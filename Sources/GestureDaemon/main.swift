@@ -1,37 +1,58 @@
 import Foundation
 
-var shouldExit = false
+// 信号处理：信号处理器只设标志位，CFRunLoop timer 定期检查并安全退出
+var exitFlag: Int32 = 0
 
-// 优雅退出 —— 设置标志位 + 停止 RunLoop
 signal(SIGINT) { _ in
-    fputs("\n[GestureDaemon] 收到 SIGINT，正在退出...\n", stderr)
-    shouldExit = true
-    CFRunLoopStop(CFRunLoopGetMain())
+    exitFlag = 1
+}
+signal(SIGTERM) { _ in
+    exitFlag = 1
 }
 
-signal(SIGTERM) { _ in
-    fputs("\n[GestureDaemon] 收到 SIGTERM，正在退出...\n", stderr)
-    shouldExit = true
-    CFRunLoopStop(CFRunLoopGetMain())
+let checkTimer = CFRunLoopTimerCreateWithHandler(
+    kCFAllocatorDefault, 0, 0.1, 0, 0
+) { _ in
+    if exitFlag != 0 {
+        print("\n[GestureDaemon] 收到退出信号，正在退出...")
+        CFRunLoopStop(CFRunLoopGetMain())
+    }
 }
+CFRunLoopAddTimer(CFRunLoopGetMain(), checkTimer, .commonModes)
+
+// --- 默认配置路径 ---
+let homeGestureDir = NSString(string: "~/.gesture").expandingTildeInPath
+let homeGestureConfig = homeGestureDir + "/config.json"
 
 // --- 命令行参数 ---
 let configPath: String
 if CommandLine.arguments.count > 1 {
-    let arg = CommandLine.arguments[1]
+    let arg = (CommandLine.arguments[1] as NSString).expandingTildeInPath
     if arg == "-h" || arg == "--help" {
         printHelp()
         exit(0)
     }
     configPath = arg
 } else {
-    let candidate = URL(fileURLWithPath: #file)
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .deletingLastPathComponent()
-        .appendingPathComponent("config.json")
-        .path
-    configPath = FileManager.default.fileExists(atPath: candidate) ? candidate : ""
+    // 优先级：1) CWD config.json  2) ~/.gesture/config.json  3) auto-create
+    let cwdCandidate = FileManager.default.currentDirectoryPath + "/config.json"
+    if FileManager.default.fileExists(atPath: cwdCandidate) {
+        configPath = cwdCandidate
+    } else if FileManager.default.fileExists(atPath: homeGestureConfig) {
+        configPath = homeGestureConfig
+    } else {
+        // 自动创建 ~/.gesture/ 并写入默认配置
+        do {
+            try FileManager.default.createDirectory(atPath: homeGestureDir, withIntermediateDirectories: true)
+            let defaultJSON = defaultConfigJSON()
+            try defaultJSON.write(toFile: homeGestureConfig, atomically: true, encoding: .utf8)
+            print("[GestureDaemon] 已在 \(homeGestureConfig) 创建默认配置")
+            configPath = homeGestureConfig
+        } catch {
+            print("[GestureDaemon] 创建默认配置失败: \(error.localizedDescription)")
+            configPath = ""
+        }
+    }
 }
 
 // --- 加载配置 ---
@@ -68,6 +89,28 @@ do {
     exit(1)
 }
 
+func defaultConfigJSON() -> String {
+    return """
+{
+  "gestures": [
+    { "name": "三指下滑关闭窗口", "fingers": 3, "direction": "down",  "minDistance": 0.15, "keys": ["cmd", "w"] }
+  ],
+  "hotkeys": [
+    { "name": "Ctrl+Shift+A → Cmd+C", "when": ["ctrl", "shift", "a"], "send": ["cmd", "c"] },
+    { "name": "Ctrl+Shift+X → Cmd+V", "when": ["ctrl", "shift", "x"], "send": ["cmd", "v"] },
+    { "name": "Cmd+H → Left", "when": ["cmd", "h"], "send": ["left"] },
+    { "name": "Cmd+J → Down", "when": ["cmd", "j"], "send": ["down"] },
+    { "name": "Cmd+K → Up",   "when": ["cmd", "k"], "send": ["up"] },
+    { "name": "Cmd+L → Right","when": ["cmd", "l"], "send": ["right"] }
+  ],
+  "settings": {
+    "debounceMs": 150,
+    "logLevel": "info"
+  }
+}
+"""
+}
+
 func printHelp() {
     print("""
         GestureDaemon - macOS 触控板手势映射工具
@@ -96,5 +139,6 @@ func printHelp() {
         }
 
         系统要求: macOS 13+, 触控板, 辅助功能权限
+        配置文件: ~/.gesture/config.json
         """)
 }

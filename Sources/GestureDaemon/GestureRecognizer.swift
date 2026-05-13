@@ -12,6 +12,7 @@ final class GestureRecognizer {
     private var gestureStartCentroid: CGPoint?
     private var currentCentroid: CGPoint = .zero
     private var maxFingersSeen = 0
+    private var gestureFingers = 0
     private var startSpread: CGFloat = 0
     private var endSpread: CGFloat = 0
 
@@ -33,7 +34,7 @@ final class GestureRecognizer {
         maxFingersSeen = max(maxFingersSeen, nowCount)
 
         if nowCount == 0 && prevCount > 0 {
-            evaluateGesture()
+            evaluateGesture(fingers: gestureFingers > 0 ? gestureFingers : maxFingersSeen)
             reset()
             return
         }
@@ -48,13 +49,15 @@ final class GestureRecognizer {
         if gestureStartCentroid == nil {
             gestureStartCentroid = currentCentroid
             startSpread = calculateSpread()
+            gestureFingers = maxFingersSeen
         }
+
+        gestureFingers = max(gestureFingers, nowCount)
 
         endSpread = calculateSpread()
     }
 
-    private func evaluateGesture() {
-        let fingers = maxFingersSeen
+    private func evaluateGesture(fingers: Int) {
         guard fingers >= 2, let start = gestureStartCentroid else { return }
 
         let dx = currentCentroid.x - start.x
@@ -71,7 +74,7 @@ final class GestureRecognizer {
             if abs(dx) > abs(dy) {
                 direction = dx > 0 ? .right : .left
             } else {
-                direction = dy > 0 ? .down : .up
+                direction = dy > 0 ? .up : .down
             }
         } else {
             return
@@ -91,6 +94,7 @@ final class GestureRecognizer {
         startSpread = 0
         endSpread = 0
         maxFingersSeen = 0
+        gestureFingers = 0
     }
 
     private func updateCentroid() {

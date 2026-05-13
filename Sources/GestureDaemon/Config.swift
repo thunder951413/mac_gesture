@@ -42,7 +42,9 @@ final class Config {
         let config = try decoder.decode(AppConfig.self, from: data)
         self.gestures = config.gestures
         self.hotkeys = config.hotkeys ?? []
-        self.settings = config.settings
+        var debounce = config.settings.debounceMs
+        if debounce < 0 { debounce = 0 }
+        self.settings = AppConfig.SettingsConfig(debounceMs: debounce, logLevel: config.settings.logLevel)
     }
 
     init(defaultConfig: Bool = true) {
@@ -55,8 +57,8 @@ final class Config {
             GestureMapping(name: "四指上滑切换应用", fingers: 4, direction: .up, minDistance: 0.12, keys: ["cmd", "tab"])
         ]
         self.hotkeys = [
-            HotkeyMapping(name: "Ctrl+Shift+A → Hello输入", when: ["ctrl", "shift", "a"], send: ["hello"]),
+            HotkeyMapping(name: "Ctrl+Shift+A → Cmd+C", when: ["ctrl", "shift", "a"], send: ["cmd", "c"]),
         ]
-        self.settings = AppConfig.SettingsConfig(debounceMs: 300, logLevel: "info")
+        self.settings = AppConfig.SettingsConfig(debounceMs: 150, logLevel: "info")
     }
 }

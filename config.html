@@ -1,0 +1,458 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GestureDaemon 配置</title>
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background: #f5f5f7; color: #1d1d1f; padding: 40px 20px;
+  max-width: 900px; margin: 0 auto;
+}
+h1 { font-size: 28px; font-weight: 700; margin-bottom: 8px; }
+.subtitle { color: #6e6e73; font-size: 14px; margin-bottom: 32px; }
+.section { background: #fff; border-radius: 12px; padding: 24px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.section h2 { font-size: 18px; font-weight: 600; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th { text-align: left; font-weight: 500; color: #6e6e73; padding: 8px 12px; border-bottom: 1px solid #e8e8ed; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+td { padding: 10px 12px; border-bottom: 1px solid #f0f0f2; vertical-align: middle; }
+tr:hover td { background: #fafafa; }
+.badge { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; }
+.badge-direction { background: #e8f0fe; color: #1967d2; }
+.badge-keys { background: #f3e8fd; color: #7c3aed; }
+.badge-fingers { background: #fef3e8; color: #d97706; }
+.btn { padding: 6px 14px; border-radius: 6px; border: none; font-size: 13px; font-weight: 500; cursor: pointer; transition: all .15s; }
+.btn-primary { background: #0071e3; color: #fff; }
+.btn-primary:hover { background: #0077ed; }
+.btn-danger { background: #ff3b30; color: #fff; }
+.btn-danger:hover { background: #d32f2f; }
+.btn-secondary { background: #e8e8ed; color: #1d1d1f; }
+.btn-secondary:hover { background: #d2d2d7; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+.actions { display: flex; gap: 6px; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+.form-group { display: flex; flex-direction: column; gap: 4px; }
+.form-group.full { grid-column: 1 / -1; }
+.form-group label { font-size: 12px; font-weight: 500; color: #6e6e73; }
+.form-group input, .form-group select { padding: 8px 10px; border: 1px solid #d2d2d7; border-radius: 6px; font-size: 14px; outline: none; transition: border-color .15s; }
+.form-group input:focus, .form-group select:focus { border-color: #0071e3; box-shadow: 0 0 0 3px rgba(0,113,227,.15); }
+.form-group input[type="range"] { padding: 0; border: none; }
+.range-value { font-size: 13px; color: #6e6e73; }
+.empty-state { text-align: center; padding: 32px 0; color: #6e6e73; font-size: 14px; }
+.keys-input { display: flex; flex-wrap: wrap; gap: 4px; }
+.key-tag { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: 500; background: #f3e8fd; color: #7c3aed; }
+.key-tag .remove { cursor: pointer; font-size: 14px; line-height: 1; color: #7c3aed; opacity: .6; }
+.key-tag .remove:hover { opacity: 1; }
+.keys-editor { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.keys-editor .key-tag { margin: 0; }
+.keys-editor select { font-size: 12px; padding: 3px 6px; border-radius: 4px; border: 1px solid #d2d2d7; }
+.toast { position: fixed; bottom: 24px; left: 50%; transform: translateX(-50%); background: #1d1d1f; color: #fff; padding: 12px 24px; border-radius: 8px; font-size: 14px; opacity: 0; transition: opacity .3s; pointer-events: none; z-index: 100; }
+.toast.show { opacity: 1; }
+.file-bar { display: flex; align-items: center; gap: 12px; padding: 12px 16px; background: #fff; border-radius: 12px; margin-bottom: 24px; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+.file-bar .path { flex: 1; font-size: 13px; color: #6e6e73; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-bar .path.loaded { color: #1d1d1f; font-weight: 500; }
+.file-path-hint { font-size: 11px; color: #86868b; margin-top: 2px; }
+.settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-dot.connected { background: #30d158; }
+.status-dot.disconnected { background: #ff9f0a; }
+</style>
+</head>
+<body>
+
+<h1>GestureDaemon 配置</h1>
+<p class="subtitle">配置文件保存于 <code style="background:#e8e8ed;padding:2px 6px;border-radius:4px">~/.gesture/config.json</code>，页面关闭后修改自动持久化</p>
+
+<div class="file-bar">
+  <span id="fileStatus"><span class="status-dot disconnected"></span> 未连接配置文件</span>
+  <span class="path" id="filePath" style="display:none"></span>
+  <button class="btn btn-secondary" id="btnOpen" onclick="openFile()">📂 打开 config.json</button>
+  <button class="btn btn-primary" id="btnSave" onclick="saveFile()" style="display:none">💾 保存</button>
+</div>
+
+<div class="section">
+  <h2>触控板手势 <button class="btn btn-primary btn-sm" onclick="showAddGesture()">+ 添加手势</button></h2>
+  <div id="gestureTable"></div>
+</div>
+
+<div class="section">
+  <h2>键盘热键 <button class="btn btn-primary btn-sm" onclick="showAddHotkey()">+ 添加热键</button></h2>
+  <div id="hotkeyTable"></div>
+</div>
+
+<div class="section">
+  <h2>通用设置</h2>
+  <div class="settings-grid">
+    <div class="form-group"><label>防抖 (ms)</label><input type="number" id="debounceMs" min="0" max="2000" step="50"></div>
+    <div class="form-group"><label>日志级别</label><select id="logLevel"><option value="info">info</option><option value="debug">debug</option></select></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div id="modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:200;align-items:center;justify-content:center">
+<div style="background:#fff;border-radius:16px;padding:28px;width:540px;max-width:90vw;max-height:90vh;overflow-y:auto">
+  <h3 id="modalTitle" style="font-size:18px;font-weight:600;margin-bottom:16px"></h3>
+  <div id="modalBody"></div>
+  <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+    <button class="btn btn-secondary" onclick="closeModal()">取消</button>
+    <button class="btn btn-primary" id="modalConfirm">确定</button>
+  </div>
+</div>
+</div>
+
+<script>
+const DB_NAME = 'gesture-daemon-config';
+const DB_STORE = 'file-handles';
+const HOME = homeDir();
+const DEFAULT_PATH = HOME + '/.gesture/config.json';
+const SUPPORTED_KEYS = [ 'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o','p','q','r','s','t','u','v','w','x','y','z', '0','1','2','3','4','5','6','7','8','9', 'space','return','enter','tab','delete','backspace','escape','esc', 'f1','f2','f3','f4','f5','f6','f7','f8','f9','f10','f11','f12', 'left','right','up','down','home','end','pageup','pagedown', '-','=','[',']','\\',';','\'',',','.','/','`' ];
+const MODIFIERS = ['cmd','command','shift','option','opt','alt','ctrl','control','fn','function'];
+let config = null;
+let fileHandle = null;
+let modalResolve = null;
+
+function homeDir() {
+  if (navigator.userAgent.includes('Mac') && typeof window.__home === 'undefined') {
+    try { return require('os').homedir(); } catch(e) {}
+  }
+  return '~';
+}
+
+function toast(msg) {
+  const el = document.getElementById('toast');
+  el.textContent = msg; el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 2500);
+}
+
+function setConnected(path) {
+  document.getElementById('fileStatus').innerHTML = '<span class="status-dot connected"></span> 已连接';
+  document.getElementById('filePath').textContent = path;
+  document.getElementById('filePath').classList.add('loaded');
+  document.getElementById('filePath').style.display = '';
+  document.getElementById('btnOpen').textContent = '📂 重新选择';
+  document.getElementById('btnSave').style.display = '';
+}
+
+function setDisconnected() {
+  document.getElementById('fileStatus').innerHTML = '<span class="status-dot disconnected"></span> 未连接 — 配置文件: <code style="font-size:12px">' + DEFAULT_PATH + '</code>';
+  document.getElementById('filePath').style.display = 'none';
+  document.getElementById('btnOpen').textContent = '📂 打开 config.json';
+  document.getElementById('btnSave').style.display = 'none';
+}
+
+// ---- File System Access API with IndexedDB persistence ----
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore(DB_STORE); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveHandleToDB(handle) {
+  const db = await openDB();
+  const tx = db.transaction(DB_STORE, 'readwrite');
+  tx.objectStore(DB_STORE).put(handle, 'config');
+  await new Promise(r => { tx.oncomplete = r; });
+}
+
+async function loadHandleFromDB() {
+  const db = await openDB();
+  return new Promise((resolve) => {
+    const tx = db.transaction(DB_STORE, 'readonly');
+    const req = tx.objectStore(DB_STORE).get('config');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+  });
+}
+
+async function openFile() {
+  // Try File System Access API
+  if (window.showOpenFilePicker) {
+    try {
+      const [fh] = await window.showOpenFilePicker({
+        types: [{ description: 'JSON', accept: { 'application/json': ['.json'] } }],
+        multiple: false,
+      });
+      await loadFromHandle(fh);
+      await saveHandleToDB(fh);
+      return;
+    } catch (e) {
+      if (e.name !== 'AbortError') console.error(e);
+    }
+  }
+  // Fallback: traditional file input
+  fileInputFallback();
+}
+
+function fileInputFallback() {
+  const input = document.createElement('input');
+  input.type = 'file'; input.accept = '.json';
+  input.onchange = async () => {
+    const file = input.files[0]; if (!file) return;
+    setConnected(file.name);
+    const text = await file.text();
+    parseAndRender(text);
+    // Store content in localStorage as poor-man's persistence
+    try { localStorage.setItem('gesture-config', text); } catch(e) {}
+  };
+  input.click();
+}
+
+async function loadFromHandle(fh) {
+  fileHandle = fh;
+  // Verify permission is still valid
+  const opts = { mode: 'readwrite' };
+  if ((await fh.queryPermission(opts)) !== 'granted') {
+    if ((await fh.requestPermission(opts)) !== 'granted') {
+      toast('权限被拒绝');
+      return;
+    }
+  }
+  const file = await fh.getFile();
+  setConnected(file.name);
+  const text = await file.text();
+  parseAndRender(text);
+}
+
+async function restoreSession() {
+  // Try File System Access API persistence
+  const fh = await loadHandleFromDB();
+  if (fh) {
+    try {
+      // Check if permission is valid without prompting
+      const opts = { mode: 'readwrite' };
+      const perm = await fh.queryPermission(opts);
+      if (perm === 'granted') {
+        await loadFromHandle(fh);
+        return;
+      }
+      // Permission expired, need to re-request
+      if (perm === 'prompt') {
+        const req = await fh.requestPermission(opts);
+        if (req === 'granted') {
+          await loadFromHandle(fh);
+          return;
+        }
+      }
+    } catch (e) {
+      // Handle no longer valid, remove from DB
+      const db = await openDB();
+      db.transaction(DB_STORE, 'readwrite').objectStore(DB_STORE).delete('config');
+    }
+  }
+
+  // Fallback: try localStorage content
+  const saved = localStorage.getItem('gesture-config');
+  if (saved) {
+    try {
+      parseAndRender(saved);
+      setConnected('config.json (缓存)');
+      toast('已加载缓存配置');
+    } catch(e) {}
+  }
+}
+
+async function saveFile() {
+  if (!config) { toast('请先打开配置文件'); return; }
+  updateConfigFromUI();
+  const json = JSON.stringify(config, null, 2);
+
+  if (fileHandle && window.showOpenFilePicker) {
+    try {
+      const writable = await fileHandle.createWritable();
+      await writable.write(json);
+      await writable.close();
+      toast('已保存');
+      return;
+    } catch (e) {
+      toast('保存到原文件失败: ' + e.message);
+    }
+  }
+
+  // Download fallback
+  const blob = new Blob([json], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'config.json';
+  a.click();
+  URL.revokeObjectURL(a.href);
+  // Also persist in localStorage
+  try { localStorage.setItem('gesture-config', json); } catch(e) {}
+  toast('已下载 config.json，请放到 ' + DEFAULT_PATH);
+}
+
+function parseAndRender(text) {
+  try {
+    config = JSON.parse(text);
+    render();
+    toast('配置已加载');
+  } catch (e) {
+    toast('JSON 解析失败: ' + e.message);
+  }
+}
+
+function updateConfigFromUI() {
+  config.settings.debounceMs = parseInt(document.getElementById('debounceMs').value) || 150;
+  config.settings.logLevel = document.getElementById('logLevel').value;
+}
+
+function render() {
+  if (!config) return;
+  config.settings = config.settings || {};
+  config.gestures = config.gestures || [];
+  config.hotkeys = config.hotkeys || [];
+  document.getElementById('debounceMs').value = config.settings.debounceMs || 150;
+  document.getElementById('logLevel').value = config.settings.logLevel || 'info';
+  renderGestures();
+  renderHotkeys();
+}
+
+// ---- Gestures ----
+function renderGestures() {
+  const c = document.getElementById('gestureTable');
+  if (!config.gestures.length) { c.innerHTML = '<div class="empty-state">暂无手势映射，点击右上角添加</div>'; return; }
+  c.innerHTML = `<table><thead><tr><th>名称</th><th>手势</th><th>触发按键</th><th>操作</th></tr></thead>
+    <tbody>${config.gestures.map((g,i)=>`<tr>
+      <td><strong>${escHtml(g.name)}</strong></td>
+      <td><span class="badge badge-fingers">${g.fingers}指</span> <span class="badge badge-direction">${g.direction}</span> <span style="font-size:12px;color:#6e6e73;margin-left:4px">≥${g.minDistance}</span></td>
+      <td><span class="badge badge-keys">${g.keys.join(' + ')}</span></td>
+      <td class="actions"><button class="btn btn-secondary btn-sm" onclick="editGesture(${i})">编辑</button><button class="btn btn-danger btn-sm" onclick="deleteGesture(${i})">删除</button></td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+function showAddGesture() {
+  openModal('添加手势', buildGestureForm({name:'',fingers:3,direction:'down',minDistance:0.15,keys:[]}),
+    (d)=>{config.gestures.push(d);render();toast('已添加');});
+}
+
+function editGesture(idx) {
+  openModal('编辑手势', buildGestureForm(config.gestures[idx]),
+    (d)=>{config.gestures[idx]=d;render();toast('已更新');});
+}
+
+function deleteGesture(idx) {
+  if(!confirm(`删除「${config.gestures[idx].name}」？`))return;
+  config.gestures.splice(idx,1);render();toast('已删除');
+}
+
+function buildGestureForm(g) {
+  return `<div class="form-grid">
+    <div class="form-group full"><label>名称</label><input id="modal-name" value="${escHtml(g.name)}"></div>
+    <div class="form-group"><label>手指数</label><select id="modal-fingers">${[2,3,4,5].map(n=>`<option value="${n}"${g.fingers===n?' selected':''}>${n} 指</option>`)}</select></div>
+    <div class="form-group"><label>方向</label><select id="modal-direction">${['up','down','left','right','pinch','spread'].map(d=>`<option value="${d}"${g.direction===d?' selected':''}>${d}</option>`)}</select></div>
+    <div class="form-group full"><label>最小触发距离 (<span id="dist-val">${g.minDistance}</span>)</label><input type="range" id="modal-minDistance" min="0" max="0.5" step="0.01" value="${g.minDistance}" oninput="document.getElementById('dist-val').textContent=this.value"></div>
+    <div class="form-group full"><label>触发按键</label>${buildKeyEditor(g.keys||[],'modal-keys')}</div>
+  </div>`;
+}
+
+// ---- Hotkeys ----
+function renderHotkeys() {
+  const c = document.getElementById('hotkeyTable');
+  if (!config.hotkeys.length) { c.innerHTML = '<div class="empty-state">暂无热键映射，点击右上角添加</div>'; return; }
+  c.innerHTML = `<table><thead><tr><th>名称</th><th>触发组合</th><th>发送按键</th><th>操作</th></tr></thead>
+    <tbody>${config.hotkeys.map((h,i)=>`<tr>
+      <td><strong>${escHtml(h.name)}</strong></td>
+      <td><span class="badge badge-direction">${h.when.join(' + ')}</span></td>
+      <td><span class="badge badge-keys">${h.send.join(' + ')}</span></td>
+      <td class="actions"><button class="btn btn-secondary btn-sm" onclick="editHotkey(${i})">编辑</button><button class="btn btn-danger btn-sm" onclick="deleteHotkey(${i})">删除</button></td>
+    </tr>`).join('')}</tbody></table>`;
+}
+
+function showAddHotkey() {
+  openModal('添加热键', buildHotkeyForm({name:'',when:[],send:[]}),
+    (d)=>{config.hotkeys.push(d);render();toast('已添加');});
+}
+
+function editHotkey(idx) {
+  openModal('编辑热键', buildHotkeyForm(config.hotkeys[idx]),
+    (d)=>{config.hotkeys[idx]=d;render();toast('已更新');});
+}
+
+function deleteHotkey(idx) {
+  if(!confirm(`删除「${config.hotkeys[idx].name}」？`))return;
+  config.hotkeys.splice(idx,1);render();toast('已删除');
+}
+
+function buildHotkeyForm(h) {
+  return `<div class="form-grid">
+    <div class="form-group full"><label>名称</label><input id="modal-name" value="${escHtml(h.name)}"></div>
+    <div class="form-group full"><label>触发组合键</label>${buildKeyEditor(h.when||[],'modal-when')}</div>
+    <div class="form-group full"><label>发送按键</label>${buildKeyEditor(h.send||[],'modal-send')}</div>
+  </div>`;
+}
+
+// ---- Key Editor ----
+function buildKeyEditor(keys, prefix) {
+  return `<div class="keys-editor" id="${prefix}-editor">
+    ${keys.map(k=>`<span class="key-tag" data-key="${escHtml(k)}">${escHtml(k)}<span class="remove" onclick="this.parentElement.remove()">×</span></span>`).join('')}
+    <select onchange="addKey('${prefix}',this)"><option value="">+ 添加按键</option><optgroup label="修饰键">${MODIFIERS.map(k=>`<option value="${k}">${k}</option>`)}</optgroup><optgroup label="普通键">${SUPPORTED_KEYS.map(k=>`<option value="${k}">${k}</option>`)}</optgroup></select>
+  </div>`;
+}
+
+function addKey(prefix, sel) {
+  const v = sel.value; if(!v)return; sel.value='';
+  const ed = document.getElementById(prefix+'-editor');
+  const ex = [...ed.querySelectorAll('.key-tag')].map(e=>e.dataset.key);
+  if(ex.includes(v))return;
+  const s = document.createElement('span'); s.className='key-tag'; s.dataset.key=v;
+  s.innerHTML = `${v}<span class="remove" onclick="this.parentElement.remove()">×</span>`;
+  ed.insertBefore(s, sel);
+}
+
+function getKeys(prefix) {
+  return [...document.querySelectorAll(`#${prefix}-editor .key-tag`)].map(e=>e.dataset.key);
+}
+
+// ---- Modal ----
+function openModal(title, html, onConfirm) {
+  modalResolve = onConfirm;
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').innerHTML = html;
+  document.getElementById('modal').style.display = 'flex';
+  document.getElementById('modalConfirm').onclick = confirmModal;
+}
+
+function closeModal() { document.getElementById('modal').style.display='none'; modalResolve=null; }
+
+function confirmModal() {
+  if(!modalResolve)return;
+  const isGesture = document.getElementById('modal-fingers') !== null;
+  let d;
+  if(isGesture) {
+    d = { name:document.getElementById('modal-name').value.trim(), fingers:parseInt(document.getElementById('modal-fingers').value), direction:document.getElementById('modal-direction').value, minDistance:parseFloat(document.getElementById('modal-minDistance').value), keys:getKeys('modal-keys') };
+    if(!d.name){toast('请输入名称');return;} if(!d.keys.length){toast('请至少添加一个触发按键');return;}
+  } else {
+    d = { name:document.getElementById('modal-name').value.trim(), when:getKeys('modal-when'), send:getKeys('modal-send') };
+    if(!d.name){toast('请输入名称');return;} if(!d.when.length){toast('请至少添加一个触发组合键');return;} if(!d.send.length){toast('请至少添加一个发送按键');return;}
+  }
+  closeModal(); modalResolve(d);
+}
+
+function escHtml(s) { const d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+// Auto-save on UI change
+let autoSaveTimer = null;
+document.addEventListener('input', () => {
+  if (!config || !fileHandle) return;
+  clearTimeout(autoSaveTimer);
+  autoSaveTimer = setTimeout(() => { updateConfigFromUI(); }, 500);
+});
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+  if ((e.metaKey||e.ctrlKey) && e.key==='o') { e.preventDefault(); openFile(); }
+  if ((e.metaKey||e.ctrlKey) && e.key==='s') { e.preventDefault(); saveFile(); }
+});
+
+// Init
+setDisconnected();
+restoreSession();
+</script>
+</body>
+</html>

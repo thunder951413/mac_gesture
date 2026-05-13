@@ -6,48 +6,6 @@
       "direction": "down",
       "minDistance": 0.15,
       "keys": ["cmd", "w"]
-    },
-    {
-      "name": "三指上滑刷新",
-      "fingers": 3,
-      "direction": "up",
-      "minDistance": 0.15,
-      "keys": ["cmd", "r"]
-    },
-    {
-      "name": "三指左滑后退",
-      "fingers": 3,
-      "direction": "left",
-      "minDistance": 0.15,
-      "keys": ["cmd", "["]
-    },
-    {
-      "name": "三指右滑前进",
-      "fingers": 3,
-      "direction": "right",
-      "minDistance": 0.15,
-      "keys": ["cmd", "]"]
-    },
-    {
-      "name": "四指下滑隐藏应用",
-      "fingers": 4,
-      "direction": "down",
-      "minDistance": 0.12,
-      "keys": ["cmd", "h"]
-    },
-    {
-      "name": "四指上滑切换应用",
-      "fingers": 4,
-      "direction": "up",
-      "minDistance": 0.12,
-      "keys": ["cmd", "tab"]
-    },
-    {
-      "name": "五指捏合显示桌面",
-      "fingers": 5,
-      "direction": "pinch",
-      "minDistance": 0.0,
-      "keys": ["fn", "f11"]
     }
   ],
   "hotkeys": [
@@ -65,10 +23,30 @@
       "name": "Ctrl+Option+Delete → Esc",
       "when": ["ctrl", "option", "delete"],
       "send": ["escape"]
+    },
+    {
+      "name": "Cmd+H → Left",
+      "when": ["cmd", "h"],
+      "send": ["left"]
+    },
+    {
+      "name": "Cmd+J → Down",
+      "when": ["cmd", "j"],
+      "send": ["down"]
+    },
+    {
+      "name": "Cmd+K → Up",
+      "when": ["cmd", "k"],
+      "send": ["up"]
+    },
+    {
+      "name": "Cmd+L → Right",
+      "when": ["cmd", "l"],
+      "send": ["right"]
     }
   ],
   "settings": {
-    "debounceMs": 300,
+    "debounceMs": 150,
     "logLevel": "info"
   }
 }

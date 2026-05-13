@@ -9,6 +9,7 @@ final class HotkeyListener {
     private let mappings: [HotkeyMapping]
     private var activeFlags: CGEventFlags = []
     private let myPID: pid_t
+    private var keyDownCount = 0
 
     /// Only these modifier flags are considered when matching hotkeys.
     private static let relevantMods: CGEventFlags = [
@@ -21,8 +22,13 @@ final class HotkeyListener {
         self.myPID = getpid()
     }
 
-    func start() {
-        guard !mappings.isEmpty else { return }
+    deinit {
+        stop()
+    }
+
+    @discardableResult
+    func start() -> Bool {
+        guard !mappings.isEmpty else { return true }
 
         if !AXIsProcessTrusted() {
             print("[HotkeyListener] ⚠️ 需要辅助功能权限")
@@ -41,21 +47,36 @@ final class HotkeyListener {
             options: .defaultTap,
             eventsOfInterest: CGEventMask(eventMask),
             callback: { proxy, type, event, refcon in
+                guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
                 let listener = Unmanaged<HotkeyListener>
-                    .fromOpaque(refcon!)
+                    .fromOpaque(refcon)
                     .takeUnretainedValue()
                 return listener.handleEvent(proxy, type: type, event: event)
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
             print("[HotkeyListener] ❌ EventTap 创建失败，热键功能不可用")
-            return
+            return false
         }
 
         self.eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         print("[HotkeyListener] ✅ 已启动 (\(mappings.count) 个映射)")
+
+        Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            var enabled = false
+            if let tap = self.eventTap {
+                enabled = CGEvent.tapIsEnabled(tap: tap)
+                if !enabled {
+                    CGEvent.tapEnable(tap: tap, enable: true)
+                }
+            }
+            guard !enabled else { return }
+            fputs("[HotkeyListener] ⚠️ tap 已恢复 enabled:\(enabled) keyDowns:\(self.keyDownCount)\n", stderr)
+        }
+        return true
     }
 
     func stop() {
@@ -74,9 +95,8 @@ final class HotkeyListener {
 
     @inline(__always)
     private func handleEvent(_ proxy: CGEventTapProxy,
-                             type: CGEventType,
-                             event: CGEvent) -> Unmanaged<CGEvent>? {
-        // Ignore invalid/abnormal events
+                              type: CGEventType,
+                              event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let tap = eventTap {
                 CGEvent.tapEnable(tap: tap, enable: true)
@@ -84,7 +104,6 @@ final class HotkeyListener {
             return Unmanaged.passUnretained(event)
         }
 
-        // Loop prevention: events we posted carry our PID
         if event.getIntegerValueField(.eventSourceUnixProcessID) == Int64(myPID) {
             return Unmanaged.passUnretained(event)
         }
@@ -95,6 +114,7 @@ final class HotkeyListener {
             return Unmanaged.passUnretained(event)
 
         case .keyDown:
+            keyDownCount += 1
             return evaluateMapping(event)
 
         default:
@@ -102,7 +122,33 @@ final class HotkeyListener {
         }
     }
 
-    /// Check if this keyDown matches any configured hotkey mapping.
+    /// Send replacement keys via CGEvent with explicit flags,
+    /// avoiding physical modifier leakage from the original hotkey.
+    private func postReplacement(keys: [String]) {
+        let (mods, regularKeys) = KeySimulator.classifyKeys(keys)
+        let flags = KeySimulator.modifierFlags(for: mods)
+        let src = CGEventSource(stateID: .privateState)
+
+        for key in regularKeys {
+            guard let keyCode = KeySimulator.keyCodeFor(name: key) else { continue }
+
+            let down = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: true)
+            down?.flags = flags
+            down?.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
+            down?.setIntegerValueField(.keyboardEventKeyboardType, value: 58)
+            down?.post(tap: .cgSessionEventTap)
+            usleep(30000)
+
+            let up = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: false)
+            up?.flags = flags
+            up?.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
+            up?.setIntegerValueField(.keyboardEventKeyboardType, value: 58)
+            up?.post(tap: .cgSessionEventTap)
+        }
+
+        fputs("[HotkeyListener] 替换发送: \(keys.joined(separator: "+")) flags:\(flags.rawValue)\n", stderr)
+    }
+
     private func evaluateMapping(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
@@ -118,8 +164,8 @@ final class HotkeyListener {
 
             // Match! Suppress and replace.
             print("[HotkeyListener] 触发热键: \(m.name)  →  \(m.send.joined(separator: "+"))")
-            DispatchQueue.global(qos: .userInitiated).async { [self] in
-                _ = keySimulator.trigger(keys: m.send, gestureName: "hotkey:\(m.name)")
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.postReplacement(keys: m.send)
             }
             return nil
         }

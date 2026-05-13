@@ -10,7 +10,8 @@ final class TouchListener {
     private let frameworkHandle: UnsafeMutableRawPointer
 
     fileprivate static let touchStructSize: Int = 64
-    fileprivate static var frameCount: Int = 0
+    private static let maxFingers = 20
+    fileprivate static var frameCount: Int32 = 0
 
     // MARK: - Correct callback signatures (macOS 14+ / 26)
 
@@ -65,6 +66,12 @@ final class TouchListener {
         guard let l = listener else { return }
         guard let data = data, nFingers > 0 else { l.onTouch([], ts); return }
 
+        guard nFingers <= maxFingers else {
+            fputs("[TouchListener] 异常手指数量: \(nFingers)，已忽略\n", stderr)
+            l.onTouch([], ts)
+            return
+        }
+
         frameCount += 1
         var touches = [ActiveTouch]()
         let p = data.assumingMemoryBound(to: UInt8.self)
@@ -97,6 +104,9 @@ final class TouchListener {
             if let h = dlopen(p, RTLD_LAZY | RTLD_LOCAL) {
                 fputs("[TouchListener] 加载: \(p)\n", stderr)
                 return h
+            }
+            if let err = dlerror() {
+                fputs("[TouchListener] dlopen 失败 (\(p)): \(String(cString: err))\n", stderr)
             }
         }
         throw TouchError("无法加载 \(f)")

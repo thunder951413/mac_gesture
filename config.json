@@ -1,0 +1,74 @@
+{
+  "gestures": [
+    {
+      "name": "三指下滑关闭窗口",
+      "fingers": 3,
+      "direction": "down",
+      "minDistance": 0.15,
+      "keys": ["cmd", "w"]
+    },
+    {
+      "name": "三指上滑刷新",
+      "fingers": 3,
+      "direction": "up",
+      "minDistance": 0.15,
+      "keys": ["cmd", "r"]
+    },
+    {
+      "name": "三指左滑后退",
+      "fingers": 3,
+      "direction": "left",
+      "minDistance": 0.15,
+      "keys": ["cmd", "["]
+    },
+    {
+      "name": "三指右滑前进",
+      "fingers": 3,
+      "direction": "right",
+      "minDistance": 0.15,
+      "keys": ["cmd", "]"]
+    },
+    {
+      "name": "四指下滑隐藏应用",
+      "fingers": 4,
+      "direction": "down",
+      "minDistance": 0.12,
+      "keys": ["cmd", "h"]
+    },
+    {
+      "name": "四指上滑切换应用",
+      "fingers": 4,
+      "direction": "up",
+      "minDistance": 0.12,
+      "keys": ["cmd", "tab"]
+    },
+    {
+      "name": "五指捏合显示桌面",
+      "fingers": 5,
+      "direction": "pinch",
+      "minDistance": 0.0,
+      "keys": ["fn", "f11"]
+    }
+  ],
+  "hotkeys": [
+    {
+      "name": "Ctrl+Shift+A → Cmd+C",
+      "when": ["ctrl", "shift", "a"],
+      "send": ["cmd", "c"]
+    },
+    {
+      "name": "Ctrl+Shift+X → Cmd+V",
+      "when": ["ctrl", "shift", "x"],
+      "send": ["cmd", "v"]
+    },
+    {
+      "name": "Ctrl+Option+Delete → Esc",
+      "when": ["ctrl", "option", "delete"],
+      "send": ["escape"]
+    }
+  ],
+  "settings": {
+    "debounceMs": 300,
+    "logLevel": "info"
+  }
+}

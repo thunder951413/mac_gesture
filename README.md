@@ -200,6 +200,58 @@ gesture-daemon config.json
 
 ---
 
+## 服务管理（后台运行 + 开机自启）
+
+将 GestureDaemon 安装为 **LaunchAgent**，后台静默运行、开机自动启动。
+
+### 安装服务
+
+```bash
+make install-service
+```
+
+这个命令会：
+1. Release 构建并安装到 `/usr/local/bin/gesture-daemon`
+2. 创建 `~/Library/LaunchAgents/com.gesturedaemon.plist`
+3. 通过 `launchctl` 注册并启动服务
+4. 日志输出到 `/tmp/gesture-daemon.log` 和 `/tmp/gesture-daemon.err`
+
+首次使用需授予辅助功能权限：
+
+```
+系统设置 → 隐私与安全性 → 辅助功能
+  → 添加: /usr/local/bin/gesture-daemon
+  → 添加后重启服务: make service-stop && make service-start
+```
+
+### 管理命令
+
+| 命令 | 说明 |
+|------|------|
+| `make service-status` | 查看服务运行状态 |
+| `make service-logs` | 查看最近日志 |
+| `make service-start` | 启动服务 |
+| `make service-stop` | 停止服务 |
+| `make install-service` | 安装并启动服务 |
+| `make uninstall-service` | 卸载服务 |
+
+### 直接管理（底层）
+
+如果偏好手动管理，也可以直接用 launchctl：
+
+```bash
+# 加载
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gesturedaemon.plist
+
+# 卸载
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.gesturedaemon.plist
+
+# 查看状态
+launchctl print gui/$(id -u)/com.gesturedaemon
+```
+
+---
+
 ## 常见问题
 
 ### 启动失败：注册失败

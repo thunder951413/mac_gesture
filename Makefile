@@ -1,8 +1,13 @@
-.PHONY: build run clean install
+.PHONY: build run clean install install-service uninstall-service
+.PHONY: service-start service-stop service-status service-logs
 
 BUILD_DIR := .build
 EXECUTABLE := $(BUILD_DIR)/debug/GestureDaemon
 RELEASE_EXECUTABLE := $(BUILD_DIR)/release/GestureDaemon
+BIN_PATH := /usr/local/bin/gesture-daemon
+PLIST_LABEL := com.gesturedaemon
+PLIST_PATH := $(HOME)/Library/LaunchAgents/$(PLIST_LABEL).plist
+LOG_DIR := /tmp
 
 build:
 	swift build
@@ -21,18 +26,87 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 install: release
-	cp $(RELEASE_EXECUTABLE) /usr/local/bin/gesture-daemon
+	cp $(RELEASE_EXECUTABLE) $(BIN_PATH)
 	mkdir -p ~/.gesture
-	@echo "已安装到 /usr/local/bin/gesture-daemon"
+	@echo "已安装到 $(BIN_PATH)"
 	@echo ""
 	@echo "首次安装后，请先授予辅助功能权限："
 	@echo "  系统设置 → 隐私与安全性 → 辅助功能"
-	@echo "  添加: /usr/local/bin/gesture-daemon"
+	@echo "  添加: $(BIN_PATH)"
 	@echo ""
 	@echo "配置文件位置: ~/.gesture/config.json"
 	@echo "首次运行会自动生成默认配置"
 	@echo ""
-	@echo "运行方式: gesture-daemon"
+	@echo "前台运行: gesture-daemon"
+	@echo "后台服务: make install-service"
 
 run-install: install
-	/usr/local/bin/gesture-daemon
+	$(BIN_PATH)
+
+# --- 后台服务（LaunchAgent） ---
+
+install-service: install
+	@mkdir -p $(HOME)/Library/LaunchAgents
+	@plutil -create xml1 $(PLIST_PATH) 2>/dev/null; rm -f $(PLIST_PATH)
+	@printf '%s\n' \
+		'<?xml version="1.0" encoding="UTF-8"?>' \
+		'<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">' \
+		'<plist version="1.0">' \
+		'<dict>' \
+		'	<key>Label</key>' \
+		'	<string>$(PLIST_LABEL)</string>' \
+		'	<key>ProgramArguments</key>' \
+		'	<array>' \
+		'		<string>$(BIN_PATH)</string>' \
+		'	</array>' \
+		'	<key>RunAtLoad</key>' \
+		'	<true/>' \
+		'	<key>KeepAlive</key>' \
+		'	<true/>' \
+		'	<key>StandardOutPath</key>' \
+		'	<string>$(LOG_DIR)/gesture-daemon.log</string>' \
+		'	<key>StandardErrorPath</key>' \
+		'	<string>$(LOG_DIR)/gesture-daemon.err</string>' \
+		'	<key>ProcessType</key>' \
+		'	<string>Background</string>' \
+		'</dict>' \
+		'</plist>' > $(PLIST_PATH)
+	@plutil -lint $(PLIST_PATH) > /dev/null
+	launchctl bootstrap gui/$(shell id -u) $(PLIST_PATH)
+	@echo ""
+	@echo "✅ 服务已安装并启动"
+	@echo "   plist: $(PLIST_PATH)"
+	@echo "   日志:  $(LOG_DIR)/gesture-daemon.log"
+	@echo "          $(LOG_DIR)/gesture-daemon.err"
+	@echo ""
+	@echo "管理命令:"
+	@echo "  查看状态: make service-status"
+	@echo "  查看日志: make service-logs"
+	@echo "  停止服务: make service-stop"
+	@echo "  卸载服务: make uninstall-service"
+
+uninstall-service:
+	launchctl bootout gui/$(shell id -u) $(PLIST_PATH) 2>/dev/null || launchctl unload $(PLIST_PATH) 2>/dev/null || true
+	rm -f $(PLIST_PATH)
+	@echo "✅ 服务已卸载"
+
+service-start:
+	launchctl bootstrap gui/$(shell id -u) $(PLIST_PATH)
+
+service-stop:
+	launchctl bootout gui/$(shell id -u) $(PLIST_PATH) 2>/dev/null || launchctl unload $(PLIST_PATH) 2>/dev/null || true
+	@echo "服务已停止"
+
+service-status:
+	@echo "--- launchctl 状态 ---"
+	launchctl print gui/$(shell id -u)/$(PLIST_LABEL) 2>&1 || echo "服务未加载"
+	@echo ""
+	@echo "--- 进程检查 ---"
+	ps aux | grep -v grep | grep gesture-daemon || echo "进程未运行"
+
+service-logs:
+	@echo "=== 标准输出日志 (gesture-daemon.log) ==="
+	@if [ -f $(LOG_DIR)/gesture-daemon.log ]; then tail -30 $(LOG_DIR)/gesture-daemon.log; else echo "(暂无日志)"; fi
+	@echo ""
+	@echo "=== 错误日志 (gesture-daemon.err) ==="
+	@if [ -f $(LOG_DIR)/gesture-daemon.err ]; then tail -30 $(LOG_DIR)/gesture-daemon.err; else echo "(暂无日志)"; fi

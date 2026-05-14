@@ -27,7 +27,8 @@ clean:
 
 install: release
 	cp $(RELEASE_EXECUTABLE) $(BIN_PATH)
-	mkdir -p ~/.gesture
+	mkdir -p $(HOME)/.gesture
+	chown $(or $(SUDO_USER),$(USER)) $(HOME)/.gesture 2>/dev/null || true
 	@echo "已安装到 $(BIN_PATH)"
 	@echo ""
 	@echo "首次安装后，请先授予辅助功能权限："
@@ -41,12 +42,18 @@ install: release
 	@echo "后台服务: make install-service"
 
 run-install: install
-	$(BIN_PATH)
+	$(BIN_PATH) $(HOME)/.gesture/config.json
 
 # --- 后台服务（LaunchAgent） ---
 
 install-service: install
-	@mkdir -p $(HOME)/Library/LaunchAgents
+	@mkdir -p $(HOME)/Library/LaunchAgents $(HOME)/.gesture
+	@chown $(or $(SUDO_USER),$(USER)) $(HOME)/.gesture 2>/dev/null || true
+	@if [ ! -f $(HOME)/.gesture/config.json ] && [ -f config.json ]; then \
+		cp config.json $(HOME)/.gesture/config.json && \
+		echo "已创建默认配置: $(HOME)/.gesture/config.json"; \
+		chown $(or $(SUDO_USER),$(USER)) $(HOME)/.gesture/config.json 2>/dev/null || true; \
+	fi
 	@plutil -create xml1 $(PLIST_PATH) 2>/dev/null; rm -f $(PLIST_PATH)
 	@printf '%s\n' \
 		'<?xml version="1.0" encoding="UTF-8"?>' \
@@ -58,6 +65,7 @@ install-service: install
 		'	<key>ProgramArguments</key>' \
 		'	<array>' \
 		'		<string>$(BIN_PATH)</string>' \
+		'		<string>$(HOME)/.gesture/config.json</string>' \
 		'	</array>' \
 		'	<key>RunAtLoad</key>' \
 		'	<true/>' \
@@ -72,29 +80,46 @@ install-service: install
 		'</dict>' \
 		'</plist>' > $(PLIST_PATH)
 	@plutil -lint $(PLIST_PATH) > /dev/null
-	launchctl bootstrap gui/$(shell id -u) $(PLIST_PATH)
+	@if launchctl print gui/$(or $(SUDO_UID),$(shell id -u))/$(PLIST_LABEL) >/dev/null 2>&1; then \
+		echo "服务已注册，正在重新启动..."; \
+		launchctl kickstart -p gui/$(or $(SUDO_UID),$(shell id -u))/$(PLIST_LABEL); \
+	else \
+		launchctl bootstrap gui/$(or $(SUDO_UID),$(shell id -u)) $(PLIST_PATH); \
+	fi
 	@echo ""
 	@echo "✅ 服务已安装并启动"
-	@echo "   plist: $(PLIST_PATH)"
-	@echo "   日志:  $(LOG_DIR)/gesture-daemon.log"
-	@echo "          $(LOG_DIR)/gesture-daemon.err"
-	@echo ""
-	@echo "管理命令:"
-	@echo "  查看状态: make service-status"
-	@echo "  查看日志: make service-logs"
-	@echo "  停止服务: make service-stop"
-	@echo "  卸载服务: make uninstall-service"
+	@echo "   二进制: $(BIN_PATH)"
+	@echo "   plist:  $(PLIST_PATH)"
+	@echo "   配置:   $(HOME)/.gesture/config.json"
+	@echo "   日志:   $(LOG_DIR)/gesture-daemon.log"
+	@echo "           $(LOG_DIR)/gesture-daemon.err"
 
 uninstall-service:
-	launchctl bootout gui/$(shell id -u) $(PLIST_PATH) 2>/dev/null || launchctl unload $(PLIST_PATH) 2>/dev/null || true
+	launchctl bootout gui/$(or $(SUDO_UID),$(shell id -u)) $(PLIST_PATH) 2>/dev/null || launchctl unload $(PLIST_PATH) 2>/dev/null || true
 	rm -f $(PLIST_PATH)
 	@echo "✅ 服务已卸载"
 
 service-start:
-	launchctl bootstrap gui/$(shell id -u) $(PLIST_PATH)
+	@if [ "$(shell id -u)" = "0" ]; then \
+		echo "❌ 错误: service-start 不需要 sudo，launchctl gui 域属于当前用户"; \
+		echo "   请直接运行: make service-start"; \
+		exit 1; \
+	fi
+	@if launchctl print gui/$(shell id -u)/$(PLIST_LABEL) >/dev/null 2>&1; then \
+		echo "服务已注册，正在启动..."; \
+		launchctl kickstart -p gui/$(shell id -u)/$(PLIST_LABEL); \
+	else \
+		echo "正在注册服务..."; \
+		launchctl bootstrap gui/$(shell id -u) $(PLIST_PATH); \
+	fi
 
 service-stop:
-	launchctl bootout gui/$(shell id -u) $(PLIST_PATH) 2>/dev/null || launchctl unload $(PLIST_PATH) 2>/dev/null || true
+	@if [ "$(shell id -u)" = "0" ]; then \
+		echo "❌ 错误: service-stop 不需要 sudo"; \
+		echo "   请直接运行: make service-stop"; \
+		exit 1; \
+	fi
+	-launchctl bootout gui/$(shell id -u) $(PLIST_PATH) 2>/dev/null
 	@echo "服务已停止"
 
 service-status:

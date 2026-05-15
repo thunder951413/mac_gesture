@@ -27,6 +27,23 @@ struct AppConfig: Codable {
     struct SettingsConfig: Codable {
         let debounceMs: Int
         let logLevel: String
+        let diagonalRejectRatio: Double
+        let downBiasRatio: Double
+
+        init(debounceMs: Int, logLevel: String, diagonalRejectRatio: Double, downBiasRatio: Double) {
+            self.debounceMs = debounceMs
+            self.logLevel = logLevel
+            self.diagonalRejectRatio = diagonalRejectRatio
+            self.downBiasRatio = downBiasRatio
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            self.debounceMs = try container.decodeIfPresent(Int.self, forKey: .debounceMs) ?? 150
+            self.logLevel = try container.decodeIfPresent(String.self, forKey: .logLevel) ?? "info"
+            self.diagonalRejectRatio = try container.decodeIfPresent(Double.self, forKey: .diagonalRejectRatio) ?? 0.95
+            self.downBiasRatio = try container.decodeIfPresent(Double.self, forKey: .downBiasRatio) ?? 0.6
+        }
     }
 }
 
@@ -44,7 +61,13 @@ final class Config {
         self.hotkeys = config.hotkeys ?? []
         var debounce = config.settings.debounceMs
         if debounce < 0 { debounce = 0 }
-        self.settings = AppConfig.SettingsConfig(debounceMs: debounce, logLevel: config.settings.logLevel)
+        var ratio = config.settings.diagonalRejectRatio
+        if ratio < 0.0 { ratio = 0.0 }
+        if ratio > 1.0 { ratio = 1.0 }
+        var bias = config.settings.downBiasRatio
+        if bias < 0.0 { bias = 0.0 }
+        if bias > 1.0 { bias = 1.0 }
+        self.settings = AppConfig.SettingsConfig(debounceMs: debounce, logLevel: config.settings.logLevel, diagonalRejectRatio: ratio, downBiasRatio: bias)
     }
 
     init(defaultConfig: Bool = true) {
@@ -59,6 +82,6 @@ final class Config {
         self.hotkeys = [
             HotkeyMapping(name: "Ctrl+Shift+A → Cmd+C", when: ["ctrl", "shift", "a"], send: ["cmd", "c"]),
         ]
-        self.settings = AppConfig.SettingsConfig(debounceMs: 150, logLevel: "info")
+        self.settings = AppConfig.SettingsConfig(debounceMs: 150, logLevel: "info", diagonalRejectRatio: 0.95, downBiasRatio: 0.6)
     }
 }

@@ -4,7 +4,7 @@
       "name": "三指下滑关闭窗口",
       "fingers": 3,
       "direction": "down",
-      "minDistance": 0.15,
+      "minDistance": 0.08,
       "keys": ["cmd", "w"]
     }
   ],
@@ -47,6 +47,8 @@
   ],
   "settings": {
     "debounceMs": 150,
-    "logLevel": "info"
+    "logLevel": "info",
+    "diagonalRejectRatio": 0.95,
+    "downBiasRatio": 0.6
   }
 }

@@ -105,7 +105,9 @@ func defaultConfigJSON() -> String {
   ],
   "settings": {
     "debounceMs": 150,
-    "logLevel": "info"
+    "logLevel": "info",
+    "diagonalRejectRatio": 0.95,
+    "downBiasRatio": 0.6
   }
 }
 """

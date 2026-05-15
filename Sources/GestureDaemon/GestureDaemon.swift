@@ -13,6 +13,8 @@ final class GestureDaemon {
         self.keySimulator = KeySimulator(debounceMs: config.settings.debounceMs)
         self.recognizer = GestureRecognizer()
         self.recognizer.logLevel = config.settings.logLevel
+        self.recognizer.diagonalRejectRatio = config.settings.diagonalRejectRatio
+        self.recognizer.downBiasRatio = config.settings.downBiasRatio
         setupRecognizer()
     }
 
@@ -27,7 +29,8 @@ final class GestureDaemon {
         print("[GestureDaemon] 已加载 \(config.gestures.count) 个手势映射, \(config.hotkeys.count) 个热键映射")
 
         // 检查辅助功能权限（CGEventPostToPid / CGEvent.tapCreate 都需要）
-        let trusted = AXIsProcessTrusted()
+        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        let trusted = AXIsProcessTrustedWithOptions(options)
         if !trusted {
             print("[GestureDaemon] ⚠️ 需要辅助功能权限才能发送按键")
             print("[GestureDaemon] 前往: 系统设置 → 隐私与安全性 → 辅助功能")
@@ -55,7 +58,12 @@ final class GestureDaemon {
         for mapping in config.gestures {
             guard mapping.fingers == event.fingers else { continue }
             guard mapping.direction == event.direction else { continue }
-            guard event.distance >= CGFloat(mapping.minDistance) else { continue }
+            guard event.distance >= CGFloat(mapping.minDistance) else {
+                if event.fingers == 3 && mapping.direction == .down {
+                    fputs("[三指诊断] 距离不足未触发\"\(mapping.name)\" | 实际=\(String(format: "%.3f", event.distance)) 需≥\(String(format: "%.2f", mapping.minDistance))\n", stderr)
+                }
+                continue
+            }
 
             let name = mapping.name
             let keys = mapping.keys
@@ -65,6 +73,13 @@ final class GestureDaemon {
                 }
             }
             return
+        }
+
+        if event.fingers == 3 {
+            let downMapping = config.gestures.first { $0.fingers == 3 && $0.direction == .down }
+            if downMapping != nil {
+                fputs("[三指诊断] 方向不匹配 | 识别为:\(event.direction) 需:down | dx=\(String(format: "%.4f", event.dx)) dy=\(String(format: "%.4f", event.dy))\n", stderr)
+            }
         }
     }
 }

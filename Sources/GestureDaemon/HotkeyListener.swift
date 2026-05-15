@@ -31,11 +31,13 @@ final class HotkeyListener {
         guard !mappings.isEmpty else { return true }
 
         if !AXIsProcessTrusted() {
-            print("[HotkeyListener] ⚠️ 需要辅助功能权限")
-            print("[HotkeyListener] 请运行: sudo tccutil reset Accessibility")
-            print("[HotkeyListener] 然后前往: 系统设置 → 隐私与安全性 → 辅助功能")
-            print("[HotkeyListener] 将 Terminal 或 \(CommandLine.arguments[0]) 添加到列表中")
-            print("[HotkeyListener] 添加后重新启动本程序")
+            print("[HotkeyListener] ⚠️ 需要辅助功能权限，尝试请求授权...")
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            let granted = AXIsProcessTrustedWithOptions(options)
+            if !granted {
+                print("[HotkeyListener] 请前往: 系统设置 → 隐私与安全性 → 辅助功能")
+                print("[HotkeyListener] 添加 \(CommandLine.arguments[0]) 后重新启动")
+            }
         }
 
         let eventMask = (1 << CGEventType.flagsChanged.rawValue)

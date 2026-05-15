@@ -5,6 +5,8 @@ struct GestureEvent {
     let fingers: Int
     let direction: GestureDirection
     let distance: CGFloat
+    let dx: CGFloat
+    let dy: CGFloat
 }
 
 final class GestureRecognizer {
@@ -18,6 +20,8 @@ final class GestureRecognizer {
 
     var onGesture: ((GestureEvent) -> Void)?
     var logLevel: String = "info"
+    var diagonalRejectRatio: Double = 0.95
+    var downBiasRatio: Double = 0.6
 
     func processTouches(_ touches: [ActiveTouch], timestamp: Double) {
         let activeSet = Set(touches.map { $0.identifier })
@@ -70,21 +74,47 @@ final class GestureRecognizer {
         var direction: GestureDirection
         if fingers >= 4 && spreadSignificant && abs(spreadDelta) > totalDistance * 2 {
             direction = spreadDelta > 0 ? .spread : .pinch
-        } else if totalDistance > 0.015 {
-            if abs(dx) > abs(dy) {
+        } else if totalDistance > 0.01 {
+            let absDx = abs(dx)
+            let absDy = abs(dy)
+            let minor = min(absDx, absDy)
+            let major = max(absDx, absDy)
+
+            if major > 0 && minor >= major * CGFloat(diagonalRejectRatio) {
+                if fingers == 3 {
+                    fputs("[三指诊断] 对角线忽略 | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) 次轴/主轴=\(String(format: "%.2f", minor/major)) 需<\(String(format: "%.2f", diagonalRejectRatio)) | 距离=\(String(format: "%.3f", totalDistance))\n", stderr)
+                }
+                return
+            }
+
+            if absDx > absDy {
                 direction = dx > 0 ? .right : .left
             } else {
                 direction = dy > 0 ? .up : .down
             }
+
+            if (direction == .left || direction == .right) && dy < 0 && absDy > absDx * CGFloat(downBiasRatio) && absDy > 0.08 {
+                direction = .down
+                if fingers == 3 {
+                    fputs("[三指诊断] 下偏修正: left/right→down | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) |dy|/|dx|=\(String(format: "%.2f", absDx > 0 ? absDy/absDx : 0)) ≥\(String(format: "%.2f", downBiasRatio))\n", stderr)
+                }
+            }
         } else {
+            if fingers == 3 {
+                fputs("[三指诊断] 距离太短忽略 | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) 距离=\(String(format: "%.4f", totalDistance)) 需>0.01\n", stderr)
+            }
             return
+        }
+
+        if fingers == 3 {
+            fputs("[三指诊断] 识别为 \(direction) | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) 距离=\(String(format: "%.3f", totalDistance))\n", stderr)
         }
 
         if logLevel == "debug" {
             fputs("[Gesture] \(fingers)指 \(direction) 距离:\(String(format: "%.3f", totalDistance))\n", stderr)
         }
 
-        onGesture?(GestureEvent(fingers: fingers, direction: direction, distance: totalDistance))
+        onGesture?(GestureEvent(fingers: fingers, direction: direction, distance: totalDistance, dx: dx, dy: dy))
     }
 
     private func reset() {

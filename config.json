@@ -49,6 +49,6 @@
     "debounceMs": 150,
     "logLevel": "info",
     "diagonalRejectRatio": 0.95,
-    "downBiasRatio": 0.6
+    "downBiasRatio": 0.35
   }
 }

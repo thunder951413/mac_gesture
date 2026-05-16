@@ -17,11 +17,13 @@ final class GestureRecognizer {
     private var gestureFingers = 0
     private var startSpread: CGFloat = 0
     private var endSpread: CGFloat = 0
+    private var didTriggerCurrentGesture = false
 
-    var onGesture: ((GestureEvent) -> Void)?
+    var onGesture: ((GestureEvent) -> Bool)?
     var logLevel: String = "info"
     var diagonalRejectRatio: Double = 0.95
-    var downBiasRatio: Double = 0.6
+    var downBiasRatio: Double = 0.35
+    var liveTriggerDistance: CGFloat = 0.06
 
     func processTouches(_ touches: [ActiveTouch], timestamp: Double) {
         let activeSet = Set(touches.map { $0.identifier })
@@ -53,16 +55,32 @@ final class GestureRecognizer {
         if gestureStartCentroid == nil {
             gestureStartCentroid = currentCentroid
             startSpread = calculateSpread()
-            gestureFingers = maxFingersSeen
         }
 
-        gestureFingers = max(gestureFingers, nowCount)
+        if nowCount > gestureFingers && !didTriggerCurrentGesture {
+            gestureFingers = nowCount
+            gestureStartCentroid = currentCentroid
+            startSpread = calculateSpread()
+        }
 
         endSpread = calculateSpread()
+
+        if !didTriggerCurrentGesture,
+           let event = recognizeGesture(fingers: gestureFingers, logDiagnostics: false),
+           event.distance >= liveTriggerDistance {
+            didTriggerCurrentGesture = onGesture?(event) == true
+        }
     }
 
     private func evaluateGesture(fingers: Int) {
-        guard fingers >= 2, let start = gestureStartCentroid else { return }
+        guard !didTriggerCurrentGesture,
+              let event = recognizeGesture(fingers: fingers, logDiagnostics: true) else { return }
+
+        didTriggerCurrentGesture = onGesture?(event) == true
+    }
+
+    private func recognizeGesture(fingers: Int, logDiagnostics: Bool) -> GestureEvent? {
+        guard fingers >= 2, let start = gestureStartCentroid else { return nil }
 
         let dx = currentCentroid.x - start.x
         let dy = currentCentroid.y - start.y
@@ -81,10 +99,10 @@ final class GestureRecognizer {
             let major = max(absDx, absDy)
 
             if major > 0 && minor >= major * CGFloat(diagonalRejectRatio) {
-                if fingers == 3 {
+                if logDiagnostics && fingers == 3 {
                     fputs("[三指诊断] 对角线忽略 | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) 次轴/主轴=\(String(format: "%.2f", minor/major)) 需<\(String(format: "%.2f", diagonalRejectRatio)) | 距离=\(String(format: "%.3f", totalDistance))\n", stderr)
                 }
-                return
+                return nil
             }
 
             if absDx > absDy {
@@ -95,26 +113,26 @@ final class GestureRecognizer {
 
             if (direction == .left || direction == .right) && dy < 0 && absDy > absDx * CGFloat(downBiasRatio) && absDy > 0.08 {
                 direction = .down
-                if fingers == 3 {
+                if logDiagnostics && fingers == 3 {
                     fputs("[三指诊断] 下偏修正: left/right→down | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) |dy|/|dx|=\(String(format: "%.2f", absDx > 0 ? absDy/absDx : 0)) ≥\(String(format: "%.2f", downBiasRatio))\n", stderr)
                 }
             }
         } else {
-            if fingers == 3 {
+            if logDiagnostics && fingers == 3 {
                 fputs("[三指诊断] 距离太短忽略 | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) 距离=\(String(format: "%.4f", totalDistance)) 需>0.01\n", stderr)
             }
-            return
+            return nil
         }
 
-        if fingers == 3 {
+        if logDiagnostics && fingers == 3 {
             fputs("[三指诊断] 识别为 \(direction) | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) 距离=\(String(format: "%.3f", totalDistance))\n", stderr)
         }
 
-        if logLevel == "debug" {
+        if logDiagnostics && logLevel == "debug" {
             fputs("[Gesture] \(fingers)指 \(direction) 距离:\(String(format: "%.3f", totalDistance))\n", stderr)
         }
 
-        onGesture?(GestureEvent(fingers: fingers, direction: direction, distance: totalDistance, dx: dx, dy: dy))
+        return GestureEvent(fingers: fingers, direction: direction, distance: totalDistance, dx: dx, dy: dy)
     }
 
     private func reset() {
@@ -125,6 +143,7 @@ final class GestureRecognizer {
         endSpread = 0
         maxFingersSeen = 0
         gestureFingers = 0
+        didTriggerCurrentGesture = false
     }
 
     private func updateCentroid() {

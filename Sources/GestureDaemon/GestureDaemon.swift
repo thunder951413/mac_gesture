@@ -20,7 +20,7 @@ final class GestureDaemon {
 
     private func setupRecognizer() {
         recognizer.onGesture = { [weak self] event in
-            self?.handleGesture(event)
+            self?.handleGesture(event) == true
         }
     }
 
@@ -54,10 +54,10 @@ final class GestureDaemon {
         CFRunLoopRun()
     }
 
-    private func handleGesture(_ event: GestureEvent) {
+    private func handleGesture(_ event: GestureEvent) -> Bool {
         for mapping in config.gestures {
             guard mapping.fingers == event.fingers else { continue }
-            guard mapping.direction == event.direction else { continue }
+            guard mapping.direction == event.direction || isFlexibleDownMatch(event, mapping: mapping) else { continue }
             guard event.distance >= CGFloat(mapping.minDistance) else {
                 if event.fingers == 3 && mapping.direction == .down {
                     fputs("[三指诊断] 距离不足未触发\"\(mapping.name)\" | 实际=\(String(format: "%.3f", event.distance)) 需≥\(String(format: "%.2f", mapping.minDistance))\n", stderr)
@@ -67,12 +67,11 @@ final class GestureDaemon {
 
             let name = mapping.name
             let keys = mapping.keys
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                if self?.keySimulator.trigger(keys: keys, gestureName: name) == true {
-                    print("[GestureDaemon] 手势触发: \(name) → \(keys.joined(separator: "+"))")
-                }
+            if keySimulator.trigger(keys: keys, gestureName: name) {
+                print("[GestureDaemon] 手势触发: \(name) → \(keys.joined(separator: "+"))")
+                return true
             }
-            return
+            return false
         }
 
         if event.fingers == 3 {
@@ -81,5 +80,12 @@ final class GestureDaemon {
                 fputs("[三指诊断] 方向不匹配 | 识别为:\(event.direction) 需:down | dx=\(String(format: "%.4f", event.dx)) dy=\(String(format: "%.4f", event.dy))\n", stderr)
             }
         }
+        return false
+    }
+
+    private func isFlexibleDownMatch(_ event: GestureEvent, mapping: GestureMapping) -> Bool {
+        guard mapping.direction == .down, event.fingers == mapping.fingers else { return false }
+        guard abs(event.dy) >= CGFloat(mapping.minDistance) else { return false }
+        return abs(event.dy) >= abs(event.dx) * CGFloat(config.settings.downBiasRatio)
     }
 }

@@ -3,6 +3,9 @@ import CoreGraphics
 import ApplicationServices
 
 final class HotkeyListener {
+    private static let replacementKeyHoldMicros: useconds_t = 1200
+    private static let replacementInterKeyMicros: useconds_t = 400
+
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private let keySimulator: KeySimulator
@@ -124,33 +127,6 @@ final class HotkeyListener {
         }
     }
 
-    /// Send replacement keys via CGEvent with explicit flags,
-    /// avoiding physical modifier leakage from the original hotkey.
-    private func postReplacement(keys: [String]) {
-        let (mods, regularKeys) = KeySimulator.classifyKeys(keys)
-        let flags = KeySimulator.modifierFlags(for: mods)
-        let src = CGEventSource(stateID: .privateState)
-
-        for key in regularKeys {
-            guard let keyCode = KeySimulator.keyCodeFor(name: key) else { continue }
-
-            let down = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: true)
-            down?.flags = flags
-            down?.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
-            down?.setIntegerValueField(.keyboardEventKeyboardType, value: 58)
-            down?.post(tap: .cgSessionEventTap)
-            usleep(30000)
-
-            let up = CGEvent(keyboardEventSource: src, virtualKey: keyCode, keyDown: false)
-            up?.flags = flags
-            up?.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
-            up?.setIntegerValueField(.keyboardEventKeyboardType, value: 58)
-            up?.post(tap: .cgSessionEventTap)
-        }
-
-        fputs("[HotkeyListener] 替换发送: \(keys.joined(separator: "+")) flags:\(flags.rawValue)\n", stderr)
-    }
-
     private func evaluateMapping(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
@@ -166,12 +142,53 @@ final class HotkeyListener {
 
             // Match! Suppress and replace.
             print("[HotkeyListener] 触发热键: \(m.name)  →  \(m.send.joined(separator: "+"))")
-            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-                self?.postReplacement(keys: m.send)
+            if postReplacement(keys: m.send) {
+                fputs("[HotkeyListener] 替换发送: \(m.send.joined(separator: "+"))\n", stderr)
             }
             return nil
         }
 
         return Unmanaged.passUnretained(event)
+    }
+
+    /// Replacement keys are sent from a private event source with explicit flags
+    /// so physical modifiers from the original hotkey do not leak into the target app.
+    private func postReplacement(keys: [String]) -> Bool {
+        let (mods, regularKeys) = KeySimulator.classifyKeys(keys)
+        guard !regularKeys.isEmpty else { return false }
+        guard AXIsProcessTrusted() else {
+            fputs("[HotkeyListener] ❌ 无辅助功能权限\n", stderr)
+            return false
+        }
+
+        let flags = KeySimulator.modifierFlags(for: mods)
+        let source = CGEventSource(stateID: .privateState)
+        var allOk = true
+
+        for key in regularKeys {
+            guard let keyCode = KeySimulator.keyCodeFor(name: key) else {
+                fputs("[HotkeyListener] 未知按键: \(key)\n", stderr)
+                allOk = false
+                continue
+            }
+
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
+                fputs("[HotkeyListener] 创建 CGEvent 失败: \(key)\n", stderr)
+                allOk = false
+                continue
+            }
+
+            down.flags = flags
+            up.flags = flags
+            down.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
+            up.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
+            down.post(tap: .cgSessionEventTap)
+            usleep(Self.replacementKeyHoldMicros)
+            up.post(tap: .cgSessionEventTap)
+            usleep(Self.replacementInterKeyMicros)
+        }
+
+        return allOk
     }
 }

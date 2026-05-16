@@ -42,7 +42,7 @@ struct AppConfig: Codable {
             self.debounceMs = try container.decodeIfPresent(Int.self, forKey: .debounceMs) ?? 150
             self.logLevel = try container.decodeIfPresent(String.self, forKey: .logLevel) ?? "info"
             self.diagonalRejectRatio = try container.decodeIfPresent(Double.self, forKey: .diagonalRejectRatio) ?? 0.95
-            self.downBiasRatio = try container.decodeIfPresent(Double.self, forKey: .downBiasRatio) ?? 0.6
+            self.downBiasRatio = try container.decodeIfPresent(Double.self, forKey: .downBiasRatio) ?? 0.35
         }
     }
 }
@@ -72,7 +72,7 @@ final class Config {
 
     init(defaultConfig: Bool = true) {
         self.gestures = [
-            GestureMapping(name: "三指下滑关闭窗口", fingers: 3, direction: .down, minDistance: 0.15, keys: ["cmd", "w"]),
+            GestureMapping(name: "三指下滑关闭窗口", fingers: 3, direction: .down, minDistance: 0.05, keys: ["cmd", "w"]),
             GestureMapping(name: "三指左滑后退", fingers: 3, direction: .left, minDistance: 0.15, keys: ["cmd", "["]),
             GestureMapping(name: "三指右滑前进", fingers: 3, direction: .right, minDistance: 0.15, keys: ["cmd", "]"]),
             GestureMapping(name: "三指上滑刷新", fingers: 3, direction: .up, minDistance: 0.15, keys: ["cmd", "r"]),
@@ -82,6 +82,6 @@ final class Config {
         self.hotkeys = [
             HotkeyMapping(name: "Ctrl+Shift+A → Cmd+C", when: ["ctrl", "shift", "a"], send: ["cmd", "c"]),
         ]
-        self.settings = AppConfig.SettingsConfig(debounceMs: 150, logLevel: "info", diagonalRejectRatio: 0.95, downBiasRatio: 0.6)
+        self.settings = AppConfig.SettingsConfig(debounceMs: 150, logLevel: "info", diagonalRejectRatio: 0.95, downBiasRatio: 0.35)
     }
 }

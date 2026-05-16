@@ -6,21 +6,22 @@ final class KeySimulator {
     private var lastTriggerTime: [String: TimeInterval] = [:]
     private let debounceSeconds: TimeInterval
     private let lock = NSLock()
+    private let myPID: pid_t
 
     init(debounceMs: Int) {
         self.debounceSeconds = TimeInterval(debounceMs) / 1000.0
+        self.myPID = getpid()
     }
 
     func trigger(keys: [String], gestureName: String) -> Bool {
-        lock.lock()
-        let now = ProcessInfo.processInfo.systemUptime
-        if let last = lastTriggerTime[gestureName], now - last < debounceSeconds {
-            lock.unlock()
-            return false
-        }
-        lastTriggerTime[gestureName] = now
-        lock.unlock()
+        trigger(keys: keys, gestureName: gestureName, useDebounce: true)
+    }
 
+    func triggerImmediate(keys: [String]) -> Bool {
+        trigger(keys: keys, gestureName: nil, useDebounce: false)
+    }
+
+    private func trigger(keys: [String], gestureName: String?, useDebounce: Bool) -> Bool {
         let (modifiers, regularKeys) = Self.classifyKeys(keys)
         guard !regularKeys.isEmpty else { return false }
 
@@ -29,91 +30,85 @@ final class KeySimulator {
             return false
         }
 
-        let modFlag = Self.applescriptModifier(for: modifiers)
+        if useDebounce, let gestureName {
+            lock.lock()
+            let now = ProcessInfo.processInfo.systemUptime
+            if let last = lastTriggerTime[gestureName], now - last < debounceSeconds {
+                lock.unlock()
+                return false
+            }
+            lock.unlock()
+        }
+
+        let source = CGEventSource(stateID: .hidSystemState)
         var allOk = true
-        for key in regularKeys {
-            guard let scriptCmd = Self.appleScriptForKey(key, modFlag: modFlag) else {
-                fputs("[KeySimulator] 无法生成 AppleScript for key: \(key)\n", stderr)
+        var modifierKeyCodes: [CGKeyCode] = []
+
+        for mod in modifiers {
+            guard let keyCode = Self.modKeyCode(name: mod) else {
+                fputs("[KeySimulator] 未知修饰键: \(mod)\n", stderr)
                 allOk = false
                 continue
             }
-            if !Self.runAppleScript(scriptCmd) {
+            modifierKeyCodes.append(keyCode)
+        }
+
+        guard allOk else { return false }
+
+        for keyCode in modifierKeyCodes {
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true) else {
+                fputs("[KeySimulator] 创建修饰键按下事件失败: \(keyCode)\n", stderr)
                 allOk = false
+                continue
             }
+            down.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
+            down.post(tap: .cghidEventTap)
+            usleep(6000)
+        }
+
+        for key in regularKeys {
+            guard let keyCode = Self.keyCodeFor(name: key) else {
+                fputs("[KeySimulator] 未知按键: \(key)\n", stderr)
+                allOk = false
+                continue
+            }
+
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
+                fputs("[KeySimulator] 创建 CGEvent 失败: \(key)\n", stderr)
+                allOk = false
+                continue
+            }
+
+            down.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
+            up.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
+            down.post(tap: .cghidEventTap)
+            usleep(10000)
+            up.post(tap: .cghidEventTap)
+            usleep(6000)
+        }
+
+        for keyCode in modifierKeyCodes.reversed() {
+            guard let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
+                fputs("[KeySimulator] 创建修饰键抬起事件失败: \(keyCode)\n", stderr)
+                allOk = false
+                continue
+            }
+            up.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
+            up.post(tap: .cghidEventTap)
+            usleep(6000)
+        }
+
+        guard allOk else { return false }
+
+        if useDebounce, let gestureName {
+            lock.lock()
+            lastTriggerTime[gestureName] = ProcessInfo.processInfo.systemUptime
+            lock.unlock()
         }
 
         fputs("[KeySimulator] \(keys.joined(separator: "+"))\n", stderr)
-        return allOk
-    }
-
-    private static var appleScriptCache = [String: NSAppleScript]()
-
-    private static func runAppleScript(_ source: String) -> Bool {
-        let script: NSAppleScript
-        if let cached = appleScriptCache[source] {
-            script = cached
-        } else {
-            guard let s = NSAppleScript(source: source) else {
-                // NSAppleScript 不可用，回退到 osascript 子进程
-                return runAppleScriptViaProcess(source)
-            }
-            appleScriptCache[source] = s
-            script = s
-        }
-
-        var error: NSDictionary?
-        script.executeAndReturnError(&error)
-        if let error = error {
-            let msg = error[NSAppleScript.errorMessage] as? String ?? "\(error)"
-            fputs("[KeySimulator] AppleScript error: \(msg)\n", stderr)
-            return false
-        }
         return true
-    }
-
-    private static func runAppleScriptViaProcess(_ source: String) -> Bool {
-        let task = Process()
-        task.launchPath = "/usr/bin/osascript"
-        task.arguments = ["-e", source]
-        task.standardError = FileHandle.nullDevice
-        task.standardOutput = FileHandle.nullDevice
-        task.launch()
-        task.waitUntilExit()
-        return task.terminationStatus == 0
-    }
-
-    private static func applescriptModifier(for mods: [String]) -> String {
-        var parts: [String] = []
-        for m in mods {
-            switch m.lowercased() {
-            case "cmd", "command": parts.append("command down")
-            case "shift": parts.append("shift down")
-            case "option", "opt", "alt": parts.append("option down")
-            case "ctrl", "control": parts.append("control down")
-            default: break
-            }
-        }
-        return parts.joined(separator: ", ")
-    }
-
-    private static func appleScriptForKey(_ key: String, modFlag: String) -> String? {
-        let lower = key.lowercased()
-        let isChar = lower.count == 1 && lower.first!.isASCII
-            && (lower.first!.isLetter || lower.first!.isNumber
-                || " -=[\\];',./`".contains(lower.first!))
-
-        if isChar {
-            let cmd = modFlag.isEmpty
-                ? "keystroke \"\(key)\""
-                : "keystroke \"\(key)\" using \(modFlag)"
-            return "tell application \"System Events\" to \(cmd)"
-        }
-
-        guard let keyCode = keyCodeFor(name: key) else { return nil }
-        let cmd = modFlag.isEmpty
-            ? "key code \(keyCode)"
-            : "key code \(keyCode) using \(modFlag)"
-        return "tell application \"System Events\" to \(cmd)"
     }
 
     static func classifyKeys(_ keys: [String]) -> ([String], [String]) {
@@ -159,7 +154,6 @@ final class KeySimulator {
 
     static func keyCodeFor(name: String) -> CGKeyCode? {
         let lower = name.lowercased()
-        // 字符键的 macOS 虚拟键码（QWERTY 硬件布局）
         let charCodes: [Character: CGKeyCode] = [
             "a": 0,   "s": 1,   "d": 2,   "f": 3,   "h": 4,   "g": 5,
             "z": 6,   "x": 7,   "c": 8,   "v": 9,   "b": 11,  "q": 12,

@@ -10,6 +10,9 @@ struct GestureEvent {
 }
 
 final class GestureRecognizer {
+    private static let extraFingerConfirmFrames = 3
+    private static let extraFingerConfirmDuration: Double = 0.018
+
     private var activeTouches: [Int: ActiveTouch] = [:]
     private var gestureStartCentroid: CGPoint?
     private var currentCentroid: CGPoint = .zero
@@ -18,6 +21,9 @@ final class GestureRecognizer {
     private var startSpread: CGFloat = 0
     private var endSpread: CGFloat = 0
     private var didTriggerCurrentGesture = false
+    private var lastObservedFingerCount = 0
+    private var lastObservedFingerTimestamp: Double = 0
+    private var observedFingerFrames = 0
 
     var onGesture: ((GestureEvent) -> Bool)?
     var logLevel: String = "info"
@@ -37,7 +43,9 @@ final class GestureRecognizer {
         }
 
         let nowCount = activeTouches.count
-        maxFingersSeen = max(maxFingersSeen, nowCount)
+        updateObservedFingerCount(nowCount, timestamp: timestamp)
+        let effectiveCount = effectiveFingerCount(for: nowCount, timestamp: timestamp)
+        maxFingersSeen = max(maxFingersSeen, effectiveCount)
 
         if nowCount == 0 && prevCount > 0 {
             evaluateGesture(fingers: gestureFingers > 0 ? gestureFingers : maxFingersSeen)
@@ -45,7 +53,7 @@ final class GestureRecognizer {
             return
         }
 
-        guard nowCount >= 2 else {
+        guard effectiveCount >= 2 else {
             if nowCount == 0 { reset() }
             return
         }
@@ -57,8 +65,8 @@ final class GestureRecognizer {
             startSpread = calculateSpread()
         }
 
-        if nowCount > gestureFingers && !didTriggerCurrentGesture {
-            gestureFingers = nowCount
+        if effectiveCount > gestureFingers && !didTriggerCurrentGesture {
+            gestureFingers = effectiveCount
             gestureStartCentroid = currentCentroid
             startSpread = calculateSpread()
         }
@@ -144,6 +152,39 @@ final class GestureRecognizer {
         maxFingersSeen = 0
         gestureFingers = 0
         didTriggerCurrentGesture = false
+        lastObservedFingerCount = 0
+        lastObservedFingerTimestamp = 0
+        observedFingerFrames = 0
+    }
+
+    private func updateObservedFingerCount(_ count: Int, timestamp: Double) {
+        if count == lastObservedFingerCount {
+            observedFingerFrames += 1
+            return
+        }
+        lastObservedFingerCount = count
+        lastObservedFingerTimestamp = timestamp
+        observedFingerFrames = 1
+    }
+
+    private func effectiveFingerCount(for observedCount: Int, timestamp: Double) -> Int {
+        guard observedCount >= 3 else { return observedCount }
+
+        let stableDuration = timestamp - lastObservedFingerTimestamp
+        let isStable = observedFingerFrames >= Self.extraFingerConfirmFrames
+            && stableDuration >= Self.extraFingerConfirmDuration
+        if isStable {
+            return observedCount
+        }
+
+        if logLevel == "debug" && observedCount == 3 {
+            fputs("[三指诊断] 忽略瞬时第3指 | 帧数=\(observedFingerFrames) 时长=\(String(format: "%.4f", stableDuration))\n", stderr)
+        }
+
+        if gestureFingers >= 2 {
+            return gestureFingers
+        }
+        return 0
     }
 
     private func updateCentroid() {

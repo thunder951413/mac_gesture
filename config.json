@@ -4,26 +4,11 @@
       "name": "三指下滑关闭窗口",
       "fingers": 3,
       "direction": "down",
-      "minDistance": 0.08,
-      "keys": ["cmd", "w"]
+      "minDistance": 0.05,
+      "keys": ["Cmd","w"]
     }
   ],
   "hotkeys": [
-    {
-      "name": "Ctrl+Shift+A → Cmd+C",
-      "when": ["ctrl", "shift", "a"],
-      "send": ["cmd", "c"]
-    },
-    {
-      "name": "Ctrl+Shift+X → Cmd+V",
-      "when": ["ctrl", "shift", "x"],
-      "send": ["cmd", "v"]
-    },
-    {
-      "name": "Ctrl+Option+Delete → Esc",
-      "when": ["ctrl", "option", "delete"],
-      "send": ["escape"]
-    },
     {
       "name": "Cmd+H → Left",
       "when": ["cmd", "h"],

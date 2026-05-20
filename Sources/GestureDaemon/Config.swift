@@ -72,7 +72,7 @@ final class Config {
 
     init(defaultConfig: Bool = true) {
         self.gestures = [
-            GestureMapping(name: "三指下滑关闭窗口", fingers: 3, direction: .down, minDistance: 0.05, keys: ["cmd", "w"]),
+            GestureMapping(name: "三指下滑关闭窗口", fingers: 3, direction: .down, minDistance: 0.12, keys: ["cmd", "w"]),
             GestureMapping(name: "三指左滑后退", fingers: 3, direction: .left, minDistance: 0.15, keys: ["cmd", "["]),
             GestureMapping(name: "三指右滑前进", fingers: 3, direction: .right, minDistance: 0.15, keys: ["cmd", "]"]),
             GestureMapping(name: "三指上滑刷新", fingers: 3, direction: .up, minDistance: 0.15, keys: ["cmd", "r"]),

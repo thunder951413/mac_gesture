@@ -16,6 +16,9 @@ final class GestureRecognizer {
     private var activeTouches: [Int: ActiveTouch] = [:]
     private var gestureStartCentroid: CGPoint?
     private var currentCentroid: CGPoint = .zero
+    private var maxGestureDx: CGFloat = 0
+    private var maxGestureDy: CGFloat = 0
+    private var maxGestureDistance: CGFloat = 0
     private var maxFingersSeen = 0
     private var gestureFingers = 0
     private var startSpread: CGFloat = 0
@@ -58,19 +61,29 @@ final class GestureRecognizer {
             return
         }
 
+        if gestureFingers > 0 && nowCount < gestureFingers {
+            if logLevel == "debug" && gestureFingers == 3 {
+                fputs("[三指诊断] 手指部分抬起，冻结完整三指中心点 | 当前=\(nowCount) 指\n", stderr)
+            }
+            return
+        }
+
         updateCentroid()
 
         if gestureStartCentroid == nil {
             gestureStartCentroid = currentCentroid
             startSpread = calculateSpread()
+            resetMaxGestureDisplacement()
         }
 
         if effectiveCount > gestureFingers && !didTriggerCurrentGesture {
             gestureFingers = effectiveCount
             gestureStartCentroid = currentCentroid
             startSpread = calculateSpread()
+            resetMaxGestureDisplacement()
         }
 
+        updateMaxGestureDisplacement()
         endSpread = calculateSpread()
 
         if !didTriggerCurrentGesture,
@@ -90,9 +103,12 @@ final class GestureRecognizer {
     private func recognizeGesture(fingers: Int, logDiagnostics: Bool) -> GestureEvent? {
         guard fingers >= 2, let start = gestureStartCentroid else { return nil }
 
-        let dx = currentCentroid.x - start.x
-        let dy = currentCentroid.y - start.y
-        let totalDistance = sqrt(dx * dx + dy * dy)
+        let currentDx = currentCentroid.x - start.x
+        let currentDy = currentCentroid.y - start.y
+        let currentDistance = sqrt(currentDx * currentDx + currentDy * currentDy)
+        let dx = maxGestureDistance > currentDistance ? maxGestureDx : currentDx
+        let dy = maxGestureDistance > currentDistance ? maxGestureDy : currentDy
+        let totalDistance = max(maxGestureDistance, currentDistance)
 
         let spreadDelta = endSpread - startSpread
         let spreadSignificant = abs(spreadDelta) > 0.03
@@ -147,6 +163,7 @@ final class GestureRecognizer {
         activeTouches.removeAll()
         gestureStartCentroid = nil
         currentCentroid = .zero
+        resetMaxGestureDisplacement()
         startSpread = 0
         endSpread = 0
         maxFingersSeen = 0
@@ -194,6 +211,24 @@ final class GestureRecognizer {
         }
         let n = CGFloat(activeTouches.count)
         currentCentroid = CGPoint(x: sum.x / n, y: sum.y / n)
+    }
+
+    private func updateMaxGestureDisplacement() {
+        guard let start = gestureStartCentroid else { return }
+        let dx = currentCentroid.x - start.x
+        let dy = currentCentroid.y - start.y
+        let distance = sqrt(dx * dx + dy * dy)
+        if distance > maxGestureDistance {
+            maxGestureDx = dx
+            maxGestureDy = dy
+            maxGestureDistance = distance
+        }
+    }
+
+    private func resetMaxGestureDisplacement() {
+        maxGestureDx = 0
+        maxGestureDy = 0
+        maxGestureDistance = 0
     }
 
     private func calculateSpread() -> CGFloat {

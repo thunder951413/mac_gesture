@@ -92,7 +92,7 @@ gesture-daemon config.json
       "name": "三指下滑关闭窗口",
       "fingers": 3,
       "direction": "down",
-      "minDistance": 0.15,
+      "minDistance": 0.22,
       "keys": ["cmd", "w"]
     }
   ]
@@ -104,7 +104,7 @@ gesture-daemon config.json
 | `name` | String | 映射名称（仅用于日志） |
 | `fingers` | Int | 手指数量（2–5） |
 | `direction` | String | 方向：`up` `down` `left` `right` `pinch` `spread` |
-| `minDistance` | Double | 最小触发距离（0.0–1.0），避免误触 |
+| `minDistance` | Double | 最小触发距离（0.0–1.0），下滑手势按向下垂直距离计算，避免误触 |
 | `keys` | [String] | 触发的按键序列 |
 
 ### 热键映射 `hotkeys`

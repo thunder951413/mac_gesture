@@ -93,7 +93,7 @@ func defaultConfigJSON() -> String {
     return """
 {
   "gestures": [
-    { "name": "三指下滑关闭窗口", "fingers": 3, "direction": "down",  "minDistance": 0.12, "keys": ["cmd", "w"] }
+    { "name": "三指下滑关闭窗口", "fingers": 3, "direction": "down",  "minDistance": 0.22, "keys": ["cmd", "w"] }
   ],
   "hotkeys": [
     { "name": "Ctrl+Shift+A → Cmd+C", "when": ["ctrl", "shift", "a"], "send": ["cmd", "c"] },
@@ -130,7 +130,7 @@ func printHelp() {
               "name": "三指下滑关闭窗口",
               "fingers": 3,
               "direction": "down",
-              "minDistance": 0.15,
+              "minDistance": 0.22,
               "keys": ["cmd", "w"]
             }
           ],

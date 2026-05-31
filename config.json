@@ -4,7 +4,7 @@
       "name": "三指下滑关闭窗口",
       "fingers": 3,
       "direction": "down",
-      "minDistance": 0.12,
+      "minDistance": 0.22,
       "keys": ["Cmd","w"]
     }
   ],

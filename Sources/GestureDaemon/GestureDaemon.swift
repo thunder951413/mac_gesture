@@ -58,9 +58,9 @@ final class GestureDaemon {
         for mapping in config.gestures {
             guard mapping.fingers == event.fingers else { continue }
             guard mapping.direction == event.direction || isFlexibleDownMatch(event, mapping: mapping) else { continue }
-            guard event.distance >= CGFloat(mapping.minDistance) else {
+            guard meetsDistanceRequirement(event, mapping: mapping) else {
                 if event.fingers == 3 && mapping.direction == .down {
-                    fputs("[三指诊断] 距离不足未触发\"\(mapping.name)\" | 实际=\(String(format: "%.3f", event.distance)) 需≥\(String(format: "%.2f", mapping.minDistance))\n", stderr)
+                    fputs("[三指诊断] 下滑距离不足未触发\"\(mapping.name)\" | 实际=\(String(format: "%.3f", downwardDistance(event))) 需≥\(String(format: "%.2f", mapping.minDistance))\n", stderr)
                 }
                 continue
             }
@@ -85,7 +85,19 @@ final class GestureDaemon {
 
     private func isFlexibleDownMatch(_ event: GestureEvent, mapping: GestureMapping) -> Bool {
         guard mapping.direction == .down, event.fingers == mapping.fingers else { return false }
-        guard abs(event.dy) >= CGFloat(mapping.minDistance) else { return false }
+        guard event.dy < 0 else { return false }
+        guard downwardDistance(event) >= CGFloat(mapping.minDistance) else { return false }
         return abs(event.dy) >= abs(event.dx) * CGFloat(config.settings.downBiasRatio)
+    }
+
+    private func meetsDistanceRequirement(_ event: GestureEvent, mapping: GestureMapping) -> Bool {
+        if mapping.direction == .down {
+            return event.dy < 0 && downwardDistance(event) >= CGFloat(mapping.minDistance)
+        }
+        return event.distance >= CGFloat(mapping.minDistance)
+    }
+
+    private func downwardDistance(_ event: GestureEvent) -> CGFloat {
+        max(0, -event.dy)
     }
 }

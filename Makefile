@@ -26,6 +26,7 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 install: release
+	mkdir -p /usr/local/bin
 	cp $(RELEASE_EXECUTABLE) $(BIN_PATH)
 	mkdir -p $(HOME)/.gesture
 	chown $(or $(SUDO_USER),$(USER)) $(HOME)/.gesture 2>/dev/null || true

@@ -10,6 +10,11 @@ let package = Package(
         .executableTarget(
             name: "GestureDaemon",
             path: "Sources/GestureDaemon"
+        ),
+        .testTarget(
+            name: "GestureDaemonTests",
+            dependencies: ["GestureDaemon"],
+            path: "Tests/GestureDaemonTests"
         )
     ]
 )

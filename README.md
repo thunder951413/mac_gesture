@@ -132,16 +132,32 @@ gesture-daemon config.json
 ```json
 {
   "settings": {
-    "debounceMs": 300,
-    "logLevel": "info"
+    "debounceMs": 150,
+    "logLevel": "info",
+    "diagonalRejectRatio": 0.95,
+    "downBiasRatio": 0.35,
+    "spreadThreshold": 0.03,
+    "minSwipeDistance": 0.01,
+    "downBiasMinAbsDy": 0.08,
+    "spreadToDistanceRatio": 2.0,
+    "liveTriggerDistance": 0.06
   }
 }
 ```
 
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
-| `debounceMs` | Int | 300 | 防抖毫秒数，同一映射在此时间内不会重复触发 |
+| `debounceMs` | Int | 150 | 防抖毫秒数，同一映射在此时间内不会重复触发 |
 | `logLevel` | String | "info" | 日志级别：`info` `debug` |
+| `diagonalRejectRatio` | Double | 0.95 | 对角线拒绝阈值：次轴/主轴 ≥ 此值则忽略（防误触） |
+| `downBiasRatio` | Double | 0.35 | 下偏修正：左右滑动中 `\|dy\|/\|dx\|` ≥ 此值则修正为 down |
+| `spreadThreshold` | Double | 0.03 | 捏合/张开识别的最小 spread 变化量 |
+| `minSwipeDistance` | Double | 0.01 | 滑动识别的最小位移距离，低于此值忽略 |
+| `downBiasMinAbsDy` | Double | 0.08 | 下偏修正需满足的最小 `\|dy\|`，避免微小抖动误修正 |
+| `spreadToDistanceRatio` | Double | 2.0 | spread 变化量需超过位移距离的此倍数才判定为 pinch/spread |
+| `liveTriggerDistance` | Double | 0.06 | 手指未抬起时的实时触发距离，达到即触发（无需抬手） |
+
+> 高级参数均有默认值，旧配置无需改动即可运行。仅当需要调优手势灵敏度/误触时按需调整。
 
 ### 支持的按键名称
 
@@ -149,6 +165,10 @@ gesture-daemon config.json
 
 **普通键：** `a`–`z` `0`–`9` `space` `return` `enter` `tab` `delete` `backspace` `escape` `esc`
 `f1`–`f12` `left` `right` `up` `down` `home` `end` `pageup` `pagedown` `-` `=` `[` `]` `\` `;` `'` `,` `.` `/` `` ` ``
+
+### 配置查看 UI（可选）
+
+仓库根目录的 `config.html` 是一个纯前端的配置可视化原型，浏览器直接打开即可查看当前 `config.json` 的手势/热键映射表。它不修改文件，仅用于本地预览。
 
 ---
 
@@ -174,7 +194,7 @@ gesture-daemon config.json
 在 debug 级别下，每次手势识别都会输出手指数和方向：
 
 ```
-[Gesture] 3指 down 距离:0.234
+[Gesture] 3指 识别为 down | dx=0.0123 dy=-0.2340 距离:0.234
 ```
 
 ---

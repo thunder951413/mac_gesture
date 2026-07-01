@@ -12,9 +12,16 @@ final class GestureDaemon {
         self.config = config
         self.keySimulator = KeySimulator(debounceMs: config.settings.debounceMs)
         self.recognizer = GestureRecognizer()
-        self.recognizer.logLevel = config.settings.logLevel
-        self.recognizer.diagonalRejectRatio = config.settings.diagonalRejectRatio
-        self.recognizer.downBiasRatio = config.settings.downBiasRatio
+        self.recognizer.tuning = GestureTuning(
+            diagonalRejectRatio: CGFloat(config.settings.diagonalRejectRatio),
+            downBiasRatio: CGFloat(config.settings.downBiasRatio),
+            spreadThreshold: CGFloat(config.settings.spreadThreshold),
+            minSwipeDistance: CGFloat(config.settings.minSwipeDistance),
+            downBiasMinAbsDy: CGFloat(config.settings.downBiasMinAbsDy),
+            spreadToDistanceRatio: CGFloat(config.settings.spreadToDistanceRatio),
+            liveTriggerDistance: CGFloat(config.settings.liveTriggerDistance),
+            logLevel: config.settings.logLevel
+        )
         setupRecognizer()
     }
 
@@ -59,8 +66,8 @@ final class GestureDaemon {
             guard mapping.fingers == event.fingers else { continue }
             guard mapping.direction == event.direction || isFlexibleDownMatch(event, mapping: mapping) else { continue }
             guard meetsDistanceRequirement(event, mapping: mapping) else {
-                if event.fingers == 3 && mapping.direction == .down {
-                    fputs("[三指诊断] 下滑距离不足未触发\"\(mapping.name)\" | 实际=\(String(format: "%.3f", downwardDistance(event))) 需≥\(String(format: "%.2f", mapping.minDistance))\n", stderr)
+                if recognizer.tuning.logLevel == "debug" {
+                    fputs("[GestureDaemon] 距离不足未触发\"\(mapping.name)\" | 实际=\(String(format: "%.3f", downwardDistance(event))) 需≥\(String(format: "%.2f", mapping.minDistance))\n", stderr)
                 }
                 continue
             }
@@ -74,10 +81,10 @@ final class GestureDaemon {
             return false
         }
 
-        if event.fingers == 3 {
-            let downMapping = config.gestures.first { $0.fingers == 3 && $0.direction == .down }
+        if recognizer.tuning.logLevel == "debug" {
+            let downMapping = config.gestures.first { $0.fingers == event.fingers && $0.direction == .down }
             if downMapping != nil {
-                fputs("[三指诊断] 方向不匹配 | 识别为:\(event.direction) 需:down | dx=\(String(format: "%.4f", event.dx)) dy=\(String(format: "%.4f", event.dy))\n", stderr)
+                fputs("[GestureDaemon] 方向不匹配 | 识别为:\(event.direction) 需:down | dx=\(String(format: "%.4f", event.dx)) dy=\(String(format: "%.4f", event.dy))\n", stderr)
             }
         }
         return false

@@ -1,6 +1,21 @@
 import Foundation
 import CoreGraphics
 
+/// MTFinger 私有结构体的字段偏移量（macOS 14+/26 实测）。
+/// 这些是私有 API，布局未公开，集中在此便于跨版本维护与校验。
+private enum MTFingerLayout {
+    /// 单个 MTFinger 结构体大小（字节）
+    static let structSize: Int = 64
+    // 字段偏移量
+    static let offsetIdentifier: Int = 16
+    static let offsetState: Int = 20
+    static let offsetX: Int = 32
+    static let offsetY: Int = 36
+    // 坐标合理性范围（归一化值，触控板外少许裕量）
+    static let coordMin: CGFloat = -0.2
+    static let coordMax: CGFloat = 1.2
+}
+
 final class TouchListener {
     typealias TouchCallback = ([ActiveTouch], Double) -> Void
 
@@ -9,8 +24,7 @@ final class TouchListener {
     private var devicePtr_: UnsafeMutableRawPointer?
     private let frameworkHandle: UnsafeMutableRawPointer
 
-    fileprivate static let touchStructSize: Int = 64
-    private static let maxFingers = 20
+    fileprivate static let maxFingers = 20
     fileprivate static var frameCount: Int32 = 0
 
     // MARK: - Correct callback signatures (macOS 14+ / 26)
@@ -74,21 +88,38 @@ final class TouchListener {
 
         frameCount += 1
         var touches = [ActiveTouch]()
+        touches.reserveCapacity(Int(nFingers))
         let p = data.assumingMemoryBound(to: UInt8.self)
-        let sz = touchStructSize
+        let sz = MTFingerLayout.structSize
         for i in 0..<Int(nFingers) {
             let b = p.advanced(by: i * sz)
-            let ident = Int(b.advanced(by: 16).withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee })
-            let state = Int(b.advanced(by: 20).withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee })
-            let x = CGFloat(b.advanced(by: 32).withMemoryRebound(to: Float.self, capacity: 1) { $0.pointee })
-            let y = CGFloat(b.advanced(by: 36).withMemoryRebound(to: Float.self, capacity: 1) { $0.pointee })
-            if frameCount == 1, i == 0, (x < -0.2 || x > 1.2 || y < -0.2 || y > 1.2) {
-                fputs("[TouchListener] 坐标异常 (x:\(x) y:\(y)) — 偏移量可能需要调整\n", stderr)
+            let ident = Int(readInt32(b, offset: MTFingerLayout.offsetIdentifier))
+            let state = Int(readInt32(b, offset: MTFingerLayout.offsetState))
+            let x = CGFloat(readFloat(b, offset: MTFingerLayout.offsetX))
+            let y = CGFloat(readFloat(b, offset: MTFingerLayout.offsetY))
+
+            // 全量坐标合理性校验：私有结构体布局若跨版本变化会读到越界值，
+            // 此时丢弃整帧，避免空触点被误判为真实抬手并提前触发手势。
+            if !MTFingerLayout.isCoordValid(x, y) {
+                if frameCount <= 3 {
+                    fputs("[TouchListener] 坐标异常已丢弃 (i=\(i) x:\(x) y:\(y)) — 偏移量可能需要调整\n", stderr)
+                }
+                return
             }
             touches.append(ActiveTouch(identifier: ident, state: state,
                                         normalizedX: x, normalizedY: y))
         }
         l.onTouch(touches, ts)
+    }
+
+    // MARK: - Struct field readers
+
+    private static func readInt32(_ base: UnsafePointer<UInt8>, offset: Int) -> Int32 {
+        base.advanced(by: offset).withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee }
+    }
+
+    private static func readFloat(_ base: UnsafePointer<UInt8>, offset: Int) -> Float {
+        base.advanced(by: offset).withMemoryRebound(to: Float.self, capacity: 1) { $0.pointee }
     }
 
     fileprivate static weak var activeListener: TouchListener?
@@ -125,7 +156,6 @@ final class TouchListener {
         // Registration functions — void return (macOS 26 may return void)
         typealias RegVoid   = @convention(c) (UnsafeMutableRawPointer, MTContactCallback) -> Void
         typealias RegRefcon = @convention(c) (UnsafeMutableRawPointer, MTContactCallbackWithRefcon, UnsafeMutableRawPointer?) -> Void
-        typealias UnregVoid = @convention(c) (UnsafeMutableRawPointer, MTContactCallback?) -> Void
 
         // Device control — void return
         typealias DeviceCtrl = @convention(c) (UnsafeMutableRawPointer, Int32) -> Void
@@ -206,6 +236,14 @@ final class TouchListener {
         devicePtr_ = nil
         TouchListener.activeListener = nil
         fputs("[TouchListener] 资源已回收\n", stderr)
+    }
+}
+
+private extension MTFingerLayout {
+    /// 坐标是否在合理范围内。归一化坐标通常在 [0,1]，
+    /// 触控板边缘允许少许越界，但远超此范围说明结构体偏移可能错误。
+    static func isCoordValid(_ x: CGFloat, _ y: CGFloat) -> Bool {
+        x >= coordMin && x <= coordMax && y >= coordMin && y <= coordMax
     }
 }
 

@@ -2,3 +2,7 @@
 .build/
 .sisyphus/
 .swiftpm/
+.workmate/
+*.xcodeproj/
+DerivedData/
+Package.resolved

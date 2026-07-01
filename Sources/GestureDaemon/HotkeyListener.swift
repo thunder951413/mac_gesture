@@ -3,8 +3,9 @@ import CoreGraphics
 import ApplicationServices
 
 final class HotkeyListener {
-    private static let replacementKeyHoldMicros: useconds_t = 1200
-    private static let replacementInterKeyMicros: useconds_t = 400
+    /// 替换按键在独立线程上发送，避免在 EventTap 回调中阻塞系统事件队列
+    /// （阻塞过久会触发 tapDisabledByTimeout）。
+    private static let sendQueue = DispatchQueue(label: "com.gesturedaemon.hotkey-send")
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
@@ -69,17 +70,9 @@ final class HotkeyListener {
         CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
         print("[HotkeyListener] ✅ 已启动 (\(mappings.count) 个映射)")
 
+        // 周期性健康检查：系统可能因超时禁用 tap，这里检测并重新启用。
         Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            guard let self = self else { return }
-            var enabled = false
-            if let tap = self.eventTap {
-                enabled = CGEvent.tapIsEnabled(tap: tap)
-                if !enabled {
-                    CGEvent.tapEnable(tap: tap, enable: true)
-                }
-            }
-            guard !enabled else { return }
-            fputs("[HotkeyListener] ⚠️ tap 已恢复 enabled:\(enabled) keyDowns:\(self.keyDownCount)\n", stderr)
+            self?.healthCheck()
         }
         return true
     }
@@ -94,6 +87,16 @@ final class HotkeyListener {
         eventTap = nil
         runLoopSource = nil
         print("[HotkeyListener] 已停止")
+    }
+
+    private func healthCheck() {
+        guard let tap = eventTap else { return }
+        let wasEnabled = CGEvent.tapIsEnabled(tap: tap)
+        if !wasEnabled {
+            CGEvent.tapEnable(tap: tap, enable: true)
+            let nowEnabled = CGEvent.tapIsEnabled(tap: tap)
+            fputs("[HotkeyListener] ⚠️ tap 被禁用已尝试恢复 | 之前:\(wasEnabled) 之后:\(nowEnabled) keyDowns:\(keyDownCount)\n", stderr)
+        }
     }
 
     // MARK: - Event handling
@@ -140,10 +143,15 @@ final class HotkeyListener {
             let currentRelevant = activeFlags.intersection(Self.relevantMods)
             guard currentRelevant == requiredFlags else { continue }
 
-            // Match! Suppress and replace.
+            // Match! 异步派发替换按键，回调立即返回 nil 吞掉原事件，
+            // 避免在 EventTap 回调线程同步 usleep 阻塞事件队列。
             print("[HotkeyListener] 触发热键: \(m.name)  →  \(m.send.joined(separator: "+"))")
-            if postReplacement(keys: m.send) {
-                fputs("[HotkeyListener] 替换发送: \(m.send.joined(separator: "+"))\n", stderr)
+            let keysToSend = m.send
+            Self.sendQueue.async { [weak self] in
+                guard let self = self else { return }
+                if self.postReplacement(keys: keysToSend) {
+                    fputs("[HotkeyListener] 替换发送: \(keysToSend.joined(separator: "+"))\n", stderr)
+                }
             }
             return nil
         }
@@ -153,6 +161,7 @@ final class HotkeyListener {
 
     /// Replacement keys are sent from a private event source with explicit flags
     /// so physical modifiers from the original hotkey do not leak into the target app.
+    /// 在 sendQueue 上同步执行，不在 EventTap 回调线程上阻塞。
     private func postReplacement(keys: [String]) -> Bool {
         let (mods, regularKeys) = KeySimulator.classifyKeys(keys)
         guard !regularKeys.isEmpty else { return false }
@@ -184,9 +193,9 @@ final class HotkeyListener {
             down.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
             up.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
             down.post(tap: .cgSessionEventTap)
-            usleep(Self.replacementKeyHoldMicros)
+            usleep(1200)
             up.post(tap: .cgSessionEventTap)
-            usleep(Self.replacementInterKeyMicros)
+            usleep(400)
         }
 
         return allOk

@@ -41,10 +41,10 @@ if CommandLine.arguments.count > 1 {
     } else if FileManager.default.fileExists(atPath: homeGestureConfig) {
         configPath = homeGestureConfig
     } else {
-        // 自动创建 ~/.gesture/ 并写入默认配置
+        // 自动创建 ~/.gesture/ 并写入默认配置（数据源来自 Config.defaultJSON）
         do {
             try FileManager.default.createDirectory(atPath: homeGestureDir, withIntermediateDirectories: true)
-            let defaultJSON = defaultConfigJSON()
+            let defaultJSON = Config.defaultJSON
             try defaultJSON.write(toFile: homeGestureConfig, atomically: true, encoding: .utf8)
             print("[GestureDaemon] 已在 \(homeGestureConfig) 创建默认配置")
             configPath = homeGestureConfig
@@ -87,30 +87,6 @@ do {
     fputs("  3. 设备处于异常状态 —— 尝试重新插拔外接触控板\n", stderr)
     fputs("\n使用 -h 查看帮助\n", stderr)
     exit(1)
-}
-
-func defaultConfigJSON() -> String {
-    return """
-{
-  "gestures": [
-    { "name": "三指下滑关闭窗口", "fingers": 3, "direction": "down",  "minDistance": 0.22, "keys": ["cmd", "w"] }
-  ],
-  "hotkeys": [
-    { "name": "Ctrl+Shift+A → Cmd+C", "when": ["ctrl", "shift", "a"], "send": ["cmd", "c"] },
-    { "name": "Ctrl+Shift+X → Cmd+V", "when": ["ctrl", "shift", "x"], "send": ["cmd", "v"] },
-    { "name": "Cmd+H → Left", "when": ["cmd", "h"], "send": ["left"] },
-    { "name": "Cmd+J → Down", "when": ["cmd", "j"], "send": ["down"] },
-    { "name": "Cmd+K → Up",   "when": ["cmd", "k"], "send": ["up"] },
-    { "name": "Cmd+L → Right","when": ["cmd", "l"], "send": ["right"] }
-  ],
-  "settings": {
-    "debounceMs": 150,
-    "logLevel": "info",
-    "diagonalRejectRatio": 0.95,
-    "downBiasRatio": 0.35
-  }
-}
-"""
 }
 
 func printHelp() {

@@ -7,13 +7,23 @@ let package = Package(
         .macOS(.v13)
     ],
     targets: [
+        .target(
+            name: "GestureTouchCore",
+            path: "Sources/GestureTouchCore"
+        ),
+        .executableTarget(
+            name: "GestureTouchService",
+            dependencies: ["GestureTouchCore"],
+            path: "Sources/GestureTouchService"
+        ),
         .executableTarget(
             name: "GestureDaemon",
+            dependencies: ["GestureTouchCore"],
             path: "Sources/GestureDaemon"
         ),
         .testTarget(
             name: "GestureDaemonTests",
-            dependencies: ["GestureDaemon"],
+            dependencies: ["GestureDaemon", "GestureTouchCore"],
             path: "Tests/GestureDaemonTests"
         )
     ]

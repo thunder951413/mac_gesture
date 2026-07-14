@@ -1,5 +1,6 @@
 import XCTest
 import CoreGraphics
+import GestureTouchCore
 @testable import GestureDaemon
 
 final class GestureRecognizerTests: XCTestCase {

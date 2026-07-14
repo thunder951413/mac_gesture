@@ -1,117 +1,72 @@
 import Foundation
 import CoreGraphics
 import ApplicationServices
+import AppKit
 
 final class HotkeyListener {
-    /// 替换按键在独立线程上发送，避免在 EventTap 回调中阻塞系统事件队列
-    /// （阻塞过久会触发 tapDisabledByTimeout）。
-    private static let sendQueue = DispatchQueue(label: "com.gesturedaemon.hotkey-send")
+    typealias RuleHandler = (AutomationRule) -> Void
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private let keySimulator: KeySimulator
-    private let mappings: [HotkeyMapping]
+    private let rules: [AutomationRule]
+    private let onRule: RuleHandler
+    private let myPID = getpid()
     private var activeFlags: CGEventFlags = []
-    private let myPID: pid_t
-    private var keyDownCount = 0
+    private var consumedKeys = Set<CGKeyCode>()
+    private var pendingKeyUpRules: [CGKeyCode: AutomationRule] = [:]
+    private var diagnosticEventCount = 0
 
-    /// Only these modifier flags are considered when matching hotkeys.
-    private static let relevantMods: CGEventFlags = [
+    private static let relevantModifiers: CGEventFlags = [
         .maskCommand, .maskShift, .maskAlternate, .maskControl, .maskSecondaryFn
     ]
 
-    init(mappings: [HotkeyMapping], keySimulator: KeySimulator) {
-        self.mappings = mappings
-        self.keySimulator = keySimulator
-        self.myPID = getpid()
+    init(rules: [AutomationRule], onRule: @escaping RuleHandler) {
+        self.rules = rules.filter { $0.isEnabled && !$0.actions.isEmpty && $0.category == .keyboard }
+        self.onRule = onRule
     }
 
-    deinit {
-        stop()
-    }
+    deinit { stop() }
 
     @discardableResult
     func start() -> Bool {
-        guard !mappings.isEmpty else { return true }
-
-        if !AXIsProcessTrusted() {
-            print("[HotkeyListener] ⚠️ 需要辅助功能权限，尝试请求授权...")
-            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-            let granted = AXIsProcessTrustedWithOptions(options)
-            if !granted {
-                print("[HotkeyListener] 请前往: 系统设置 → 隐私与安全性 → 辅助功能")
-                print("[HotkeyListener] 添加 \(CommandLine.arguments[0]) 后重新启动")
-            }
-        }
-
-        let eventMask = (1 << CGEventType.flagsChanged.rawValue)
-                      | (1 << CGEventType.keyDown.rawValue)
-
+        guard !rules.isEmpty else { return true }
+        let mask = (1 << CGEventType.flagsChanged.rawValue)
+            | (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.keyUp.rawValue)
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
             place: .headInsertEventTap,
             options: .defaultTap,
-            eventsOfInterest: CGEventMask(eventMask),
-            callback: { proxy, type, event, refcon in
-                guard let refcon = refcon else { return Unmanaged.passUnretained(event) }
-                let listener = Unmanaged<HotkeyListener>
-                    .fromOpaque(refcon)
-                    .takeUnretainedValue()
-                return listener.handleEvent(proxy, type: type, event: event)
+            eventsOfInterest: CGEventMask(mask),
+            callback: { _, type, event, refcon in
+                guard let refcon else { return Unmanaged.passUnretained(event) }
+                return Unmanaged<HotkeyListener>.fromOpaque(refcon).takeUnretainedValue()
+                    .handle(type: type, event: event)
             },
             userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
-            print("[HotkeyListener] ❌ EventTap 创建失败，热键功能不可用")
-            return false
-        }
+        ) else { return false }
 
-        self.eventTap = tap
+        eventTap = tap
         runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
-        CFRunLoopAddSource(CFRunLoopGetCurrent(), runLoopSource, .commonModes)
-        print("[HotkeyListener] ✅ 已启动 (\(mappings.count) 个映射)")
-
-        // 周期性健康检查：系统可能因超时禁用 tap，这里检测并重新启用。
-        Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
-            self?.healthCheck()
-        }
+        CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
         return true
     }
 
     func stop() {
-        if let source = runLoopSource {
-            CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes)
-        }
-        if let tap = eventTap {
-            CFMachPortInvalidate(tap)
-        }
-        eventTap = nil
+        if let source = runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        if let eventTap { CFMachPortInvalidate(eventTap) }
         runLoopSource = nil
-        print("[HotkeyListener] 已停止")
+        eventTap = nil
+        consumedKeys.removeAll()
+        pendingKeyUpRules.removeAll()
     }
 
-    private func healthCheck() {
-        guard let tap = eventTap else { return }
-        let wasEnabled = CGEvent.tapIsEnabled(tap: tap)
-        if !wasEnabled {
-            CGEvent.tapEnable(tap: tap, enable: true)
-            let nowEnabled = CGEvent.tapIsEnabled(tap: tap)
-            fputs("[HotkeyListener] ⚠️ tap 被禁用已尝试恢复 | 之前:\(wasEnabled) 之后:\(nowEnabled) keyDowns:\(keyDownCount)\n", stderr)
-        }
-    }
-
-    // MARK: - Event handling
-
-    @inline(__always)
-    private func handleEvent(_ proxy: CGEventTapProxy,
-                              type: CGEventType,
-                              event: CGEvent) -> Unmanaged<CGEvent>? {
+    private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-            if let tap = eventTap {
-                CGEvent.tapEnable(tap: tap, enable: true)
-            }
+            if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
-
         if event.getIntegerValueField(.eventSourceUnixProcessID) == Int64(myPID) {
             return Unmanaged.passUnretained(event)
         }
@@ -119,85 +74,70 @@ final class HotkeyListener {
         switch type {
         case .flagsChanged:
             activeFlags = event.flags
+            trace("flagsChanged flags=\(event.flags.rawValue)")
             return Unmanaged.passUnretained(event)
-
         case .keyDown:
-            keyDownCount += 1
-            return evaluateMapping(event)
-
+            trace("keyDown code=\(event.getIntegerValueField(.keyboardEventKeycode)) flags=\(event.flags.rawValue) repeat=\(event.getIntegerValueField(.keyboardEventAutorepeat)) sourcePID=\(event.getIntegerValueField(.eventSourceUnixProcessID))")
+            return handleKeyDown(event)
+        case .keyUp:
+            return handleKeyUp(event)
         default:
             return Unmanaged.passUnretained(event)
         }
     }
 
-    private func evaluateMapping(_ event: CGEvent) -> Unmanaged<CGEvent>? {
-        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+    private func handleKeyDown(_ event: CGEvent) -> Unmanaged<CGEvent>? {
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
 
-        for m in mappings {
-            let (mods, regular) = KeySimulator.classifyKeys(m.when)
-            guard regular.count == 1 else { continue }
-            guard let targetCode = KeySimulator.keyCodeFor(name: regular[0]) else { continue }
-            guard CGKeyCode(keyCode) == targetCode else { continue }
-
-            let requiredFlags = KeySimulator.modifierFlags(for: mods)
-            let currentRelevant = activeFlags.intersection(Self.relevantMods)
-            guard currentRelevant == requiredFlags else { continue }
-
-            // Match! 异步派发替换按键，回调立即返回 nil 吞掉原事件，
-            // 避免在 EventTap 回调线程同步 usleep 阻塞事件队列。
-            print("[HotkeyListener] 触发热键: \(m.name)  →  \(m.send.joined(separator: "+"))")
-            let keysToSend = m.send
-            Self.sendQueue.async { [weak self] in
-                guard let self = self else { return }
-                if self.postReplacement(keys: keysToSend) {
-                    fputs("[HotkeyListener] 替换发送: \(keysToSend.joined(separator: "+"))\n", stderr)
-                }
+        if consumedKeys.contains(keyCode) {
+            if isRepeat, let rule = matchingRule(keyCode: keyCode, flags: event.flags), case .keyboard(let trigger) = rule.trigger,
+               trigger.allowRepeat, trigger.phase == .keyDown {
+                onRule(rule)
             }
             return nil
         }
 
-        return Unmanaged.passUnretained(event)
+        guard let rule = matchingRule(keyCode: keyCode, flags: event.flags), case .keyboard(let trigger) = rule.trigger else {
+            trace("未匹配 code=\(keyCode) relevantFlags=\(event.flags.intersection(Self.relevantModifiers).rawValue)")
+            return Unmanaged.passUnretained(event)
+        }
+        DiagnosticLog.shared.write("[Keyboard] 匹配规则：\(rule.name)")
+        consumedKeys.insert(keyCode)
+        if trigger.phase == .keyDown {
+            if !isRepeat || trigger.allowRepeat { onRule(rule) }
+        } else {
+            pendingKeyUpRules[keyCode] = rule
+        }
+        return nil
     }
 
-    /// Replacement keys are sent from a private event source with explicit flags
-    /// so physical modifiers from the original hotkey do not leak into the target app.
-    /// 在 sendQueue 上同步执行，不在 EventTap 回调线程上阻塞。
-    private func postReplacement(keys: [String]) -> Bool {
-        let (mods, regularKeys) = KeySimulator.classifyKeys(keys)
-        guard !regularKeys.isEmpty else { return false }
-        guard AXIsProcessTrusted() else {
-            fputs("[HotkeyListener] ❌ 无辅助功能权限\n", stderr)
-            return false
+    private func handleKeyUp(_ event: CGEvent) -> Unmanaged<CGEvent>? {
+        let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
+        guard consumedKeys.remove(keyCode) != nil else { return Unmanaged.passUnretained(event) }
+        if let rule = pendingKeyUpRules.removeValue(forKey: keyCode) { onRule(rule) }
+        return nil
+    }
+
+    private func matchingRule(keyCode: CGKeyCode, flags: CGEventFlags) -> AutomationRule? {
+        // keyDown 自身携带的 flags 比单独缓存 flagsChanged 更可靠，特别是快速组合键
+        // 与合成事件；activeFlags 仅作为部分设备未附带 flags 时的回退。
+        let eventModifiers = flags.intersection(Self.relevantModifiers)
+        let current = eventModifiers.isEmpty ? activeFlags.intersection(Self.relevantModifiers) : eventModifiers
+        return rules.first { rule in
+            guard rule.applicationScope.matches(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) else { return false }
+            guard case .keyboard(let trigger) = rule.trigger else { return false }
+            let (mods, regular) = KeySimulator.classifyKeys(trigger.keys)
+            guard regular.count == 1,
+                  let target = KeySimulator.keyCodeFor(name: regular[0]),
+                  target == keyCode else { return false }
+            return KeySimulator.modifierFlags(for: mods) == current
         }
+    }
 
-        let flags = KeySimulator.modifierFlags(for: mods)
-        let source = CGEventSource(stateID: .privateState)
-        var allOk = true
-
-        for key in regularKeys {
-            guard let keyCode = KeySimulator.keyCodeFor(name: key) else {
-                fputs("[HotkeyListener] 未知按键: \(key)\n", stderr)
-                allOk = false
-                continue
-            }
-
-            guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
-                  let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
-                fputs("[HotkeyListener] 创建 CGEvent 失败: \(key)\n", stderr)
-                allOk = false
-                continue
-            }
-
-            down.flags = flags
-            up.flags = flags
-            down.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
-            up.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
-            down.post(tap: .cgSessionEventTap)
-            usleep(1200)
-            up.post(tap: .cgSessionEventTap)
-            usleep(400)
-        }
-
-        return allOk
+    private func trace(_ message: String) {
+        guard diagnosticEventCount < 40 else { return }
+        diagnosticEventCount += 1
+        DiagnosticLog.shared.write("[KeyboardTrace] \(message)")
     }
 }

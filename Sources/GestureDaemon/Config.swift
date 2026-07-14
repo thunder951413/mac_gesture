@@ -74,8 +74,7 @@ struct AppConfig: Codable {
         )
     }
 
-    /// 默认配置的单一数据源：手势 + 热键 + 设置均由此定义，
-    /// main.swift 写入磁盘与加载失败兜底都引用它，避免双份不一致。
+    /// 旧版 schema v1 的默认配置，仅保留用于配置迁移和兼容性测试。
     static let defaults = AppConfig(
         gestures: [
             GestureMapping(name: "三指下滑关闭窗口", fingers: 3, direction: .down, minDistance: 0.22, keys: ["cmd", "w"]),

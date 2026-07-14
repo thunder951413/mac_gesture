@@ -16,12 +16,15 @@ private enum MTFingerLayout {
     static let coordMax: CGFloat = 1.2
 }
 
-final class TouchListener {
-    typealias TouchCallback = ([ActiveTouch], Double) -> Void
+public final class TouchListener {
+    public typealias TouchCallback = ([ActiveTouch], Double) -> Void
 
     fileprivate var onTouch: TouchCallback
     private var deviceArray: CFArray?
-    private var devicePtr_: UnsafeMutableRawPointer?
+    private var devicePointers: [UnsafeMutableRawPointer] = []
+    private var usesRefconCallback = false
+    private var invalidFrameCount = 0
+    private var lastTimestamp: Double = 0
     private let frameworkHandle: UnsafeMutableRawPointer
 
     fileprivate static let maxFingers = 20
@@ -48,7 +51,7 @@ final class TouchListener {
         UnsafeMutableRawPointer?
     ) -> Int32
 
-    init(callback: @escaping TouchCallback) throws {
+    public init(callback: @escaping TouchCallback) throws {
         self.onTouch = callback
         self.frameworkHandle = try TouchListener.loadFramework()
         try findAndStartDevice()
@@ -80,8 +83,14 @@ final class TouchListener {
         guard let l = listener else { return }
         guard let data = data, nFingers > 0 else { l.onTouch([], ts); return }
 
+        guard ts.isFinite, ts >= l.lastTimestamp else {
+            l.registerInvalidFrame("时间戳异常: \(ts)")
+            return
+        }
+        l.lastTimestamp = ts
+
         guard nFingers <= maxFingers else {
-            fputs("[TouchListener] 异常手指数量: \(nFingers)，已忽略\n", stderr)
+            l.registerInvalidFrame("异常手指数量: \(nFingers)")
             l.onTouch([], ts)
             return
         }
@@ -91,6 +100,7 @@ final class TouchListener {
         touches.reserveCapacity(Int(nFingers))
         let p = data.assumingMemoryBound(to: UInt8.self)
         let sz = MTFingerLayout.structSize
+        var identifiers = Set<Int>()
         for i in 0..<Int(nFingers) {
             let b = p.advanced(by: i * sz)
             let ident = Int(readInt32(b, offset: MTFingerLayout.offsetIdentifier))
@@ -98,18 +108,31 @@ final class TouchListener {
             let x = CGFloat(readFloat(b, offset: MTFingerLayout.offsetX))
             let y = CGFloat(readFloat(b, offset: MTFingerLayout.offsetY))
 
+            guard (-1...128).contains(ident), identifiers.insert(ident).inserted else {
+                l.registerInvalidFrame("触点标识异常或重复: \(ident)")
+                return
+            }
+
             // 全量坐标合理性校验：私有结构体布局若跨版本变化会读到越界值，
             // 此时丢弃整帧，避免空触点被误判为真实抬手并提前触发手势。
             if !MTFingerLayout.isCoordValid(x, y) {
-                if frameCount <= 3 {
-                    fputs("[TouchListener] 坐标异常已丢弃 (i=\(i) x:\(x) y:\(y)) — 偏移量可能需要调整\n", stderr)
-                }
+                l.registerInvalidFrame("坐标异常 (i=\(i) x:\(x) y:\(y))，结构体布局可能已变化")
                 return
             }
             touches.append(ActiveTouch(identifier: ident, state: state,
                                         normalizedX: x, normalizedY: y))
         }
+        l.invalidFrameCount = 0
         l.onTouch(touches, ts)
+    }
+
+    private func registerInvalidFrame(_ reason: String) {
+        invalidFrameCount += 1
+        fputs("[TouchListener] 数据验证失败 \(invalidFrameCount)/5：\(reason)\n", stderr)
+        if invalidFrameCount >= 5 {
+            fputs("[TouchListener] 连续异常，停止高级触控板服务以触发兼容模式\n", stderr)
+            exit(3)
+        }
     }
 
     // MARK: - Struct field readers
@@ -127,6 +150,7 @@ final class TouchListener {
     // MARK: - Framework
 
     private static func loadFramework() throws -> UnsafeMutableRawPointer {
+        fputs("[TouchListener] 系统: \(ProcessInfo.processInfo.operatingSystemVersionString)\n", stderr)
         let f = "MultitouchSupport.framework"
         for p in [
             "/System/Library/PrivateFrameworks/\(f)/MultitouchSupport",
@@ -167,73 +191,45 @@ final class TouchListener {
         fputs("[TouchListener] 发现 \(count) 个设备\n", stderr)
         guard count > 0 else { throw TouchError("设备列表为空") }
 
+        guard let start: DeviceCtrl = sym("MTDeviceStart") else { throw TouchError("MTDeviceStart") }
+        let regular: RegVoid? = sym("MTRegisterContactFrameCallback")
+        let withRefcon: RegRefcon? = sym("MTRegisterContactFrameCallbackWithRefcon")
+        guard regular != nil || withRefcon != nil else { throw TouchError("找不到触点回调注册函数") }
+
+        deviceArray = arr
+        TouchListener.activeListener = self
+        usesRefconCallback = regular == nil
         let refcon = Unmanaged.passUnretained(self).toOpaque()
-
-        for di in 0..<count {
-            guard let raw = CFArrayGetValueAtIndex(arr, di) else { continue }
-            let p = UnsafeMutableRawPointer(mutating: raw)
-
-            // Strategy 1: Register → Start (correct order)
-            if let regFn: RegVoid = sym("MTRegisterContactFrameCallback"),
-               let startFn: DeviceCtrl = sym("MTDeviceStart") {
-                regFn(p, TouchListener.callback)
-                usleep(50_000)  // small delay after registration
-                startFn(p, 0)
-                deviceArray = arr; devicePtr_ = p
-                TouchListener.activeListener = self
-                fputs("[TouchListener] ✅ 设备[\(di)] register-then-start\n", stderr); return
-            }
-
-            // Strategy 2: WithRefcon variant (for older macOS)
-            if let regRef: RegRefcon = sym("MTRegisterContactFrameCallbackWithRefcon"),
-               let startRef: DeviceCtrl = sym("MTDeviceStart") {
-                regRef(p, TouchListener.callbackWithRefcon, refcon)
-                usleep(50_000)
-                startRef(p, 0)
-                deviceArray = arr; devicePtr_ = p
-                TouchListener.activeListener = self
-                fputs("[TouchListener] ✅ 设备[\(di)] with-refcon\n", stderr); return
-            }
-
-            // Strategy 3: Legacy — try unregister before register (device may be in bad state)
-            typealias Unreg5 = @convention(c) (UnsafeMutableRawPointer, MTContactCallback?) -> Void
-            typealias Unreg6 = @convention(c) (UnsafeMutableRawPointer, MTContactCallbackWithRefcon?) -> Void
-            let ureg5: Unreg5? = sym("MTUnregisterContactFrameCallback")
-            let ureg6: Unreg6? = sym("MTUnregisterContactFrameCallback")
-            let regFn: RegVoid? = sym("MTRegisterContactFrameCallback")
-            let startFn: DeviceCtrl? = sym("MTDeviceStart")
-
-            for attempt in 1...5 {
-                // Clear any stale callbacks
-                ureg5?(p, nil)
-                ureg6?(p, nil)
-                usleep(200_000)
-                if let r = regFn, let s = startFn {
-                    r(p, TouchListener.callback)
-                    usleep(50_000)
-                    s(p, 0)
-                    deviceArray = arr; devicePtr_ = p
-                    TouchListener.activeListener = self
-                    fputs("[TouchListener] ✅ 设备[\(di)] legacy-strategy attempt-\(attempt)\n", stderr); return
-                }
-            }
+        for index in 0..<count {
+            guard let raw = CFArrayGetValueAtIndex(arr, index) else { continue }
+            let pointer = UnsafeMutableRawPointer(mutating: raw)
+            if let regular { regular(pointer, TouchListener.callback) }
+            else { withRefcon?(pointer, TouchListener.callbackWithRefcon, refcon) }
+            usleep(50_000)
+            start(pointer, 0)
+            devicePointers.append(pointer)
+            fputs("[TouchListener] ✅ 已监听设备[\(index)]\n", stderr)
         }
-
-        throw TouchError("注册失败。如需重置触控板驱动状态请重启电脑")
+        if devicePointers.isEmpty { throw TouchError("没有可注册的触控板") }
     }
 
     private func stopDevice() {
-        guard let p = devicePtr_ else { return }
+        guard !devicePointers.isEmpty else { return }
         typealias U5 = @convention(c) (UnsafeMutableRawPointer, MTContactCallback?) -> Void
         typealias U6 = @convention(c) (UnsafeMutableRawPointer, MTContactCallbackWithRefcon?) -> Void
         typealias DC = @convention(c) (UnsafeMutableRawPointer, Int32) -> Void
 
-        (sym("MTUnregisterContactFrameCallback") as U5?)?(p, nil)
-        (sym("MTUnregisterContactFrameCallback") as U6?)?(p, nil)
-        usleep(500_000)
-        (sym("MTDeviceStop") as DC?)?(p, 0)
+        let unregister5: U5? = sym("MTUnregisterContactFrameCallback")
+        let unregister6: U6? = sym("MTUnregisterContactFrameCallback")
+        let stop: DC? = sym("MTDeviceStop")
+        for pointer in devicePointers {
+            if usesRefconCallback { unregister6?(pointer, TouchListener.callbackWithRefcon) }
+            else { unregister5?(pointer, TouchListener.callback) }
+            usleep(20_000)
+            stop?(pointer, 0)
+        }
         deviceArray = nil
-        devicePtr_ = nil
+        devicePointers.removeAll()
         TouchListener.activeListener = nil
         fputs("[TouchListener] 资源已回收\n", stderr)
     }
@@ -247,15 +243,22 @@ private extension MTFingerLayout {
     }
 }
 
-struct TouchError: LocalizedError {
-    let message: String
-    init(_ m: String) { self.message = m }
-    var errorDescription: String? { message }
+public struct TouchError: LocalizedError {
+    public let message: String
+    public init(_ m: String) { self.message = m }
+    public var errorDescription: String? { message }
 }
 
-struct ActiveTouch {
-    let identifier: Int
-    let state: Int
-    let normalizedX: CGFloat
-    let normalizedY: CGFloat
+public struct ActiveTouch: Codable {
+    public let identifier: Int
+    public let state: Int
+    public let normalizedX: CGFloat
+    public let normalizedY: CGFloat
+
+    public init(identifier: Int, state: Int, normalizedX: CGFloat, normalizedY: CGFloat) {
+        self.identifier = identifier
+        self.state = state
+        self.normalizedX = normalizedX
+        self.normalizedY = normalizedY
+    }
 }

@@ -1,110 +1,244 @@
 import Foundation
+import AppKit
 import ApplicationServices
+import GestureTouchCore
 
-final class GestureDaemon {
-    private let config: Config
-    private let keySimulator: KeySimulator
-    private let recognizer: GestureRecognizer
-    private var touchListener: TouchListener?
+@MainActor
+final class GestureDaemon: ObservableObject {
+    @Published private(set) var isRunning = false
+    @Published private(set) var trackpadAvailable = false
+    @Published private(set) var trackpadMode = "未启动"
+    @Published private(set) var keyboardAvailable = false
+    @Published private(set) var lastEvent = "尚未触发规则"
+    @Published private(set) var lastTouchObservation = "尚未收到触点"
+    @Published private(set) var lastGestureObservation = "尚未识别手势"
+    @Published private(set) var errorMessages: [String] = []
+    @Published private(set) var configurationWarnings: [String] = []
+
+    private var configuration = AutomationConfiguration.defaults
+    private var recognizer: GestureRecognizer?
+    private var touchService: TouchServiceProvider?
+    private var publicGestureProvider: PublicGestureProvider?
     private var hotkeyListener: HotkeyListener?
+    private var executor: ActionExecutor?
+    private var lastTriggerTimes: [UUID: TimeInterval] = [:]
+    private var touchRestartAttempts = 0
+    private var lastTouchObservationTime: TimeInterval = 0
 
-    init(config: Config) {
-        self.config = config
-        self.keySimulator = KeySimulator(debounceMs: config.settings.debounceMs)
-        self.recognizer = GestureRecognizer()
-        self.recognizer.tuning = GestureTuning(
-            diagonalRejectRatio: CGFloat(config.settings.diagonalRejectRatio),
-            downBiasRatio: CGFloat(config.settings.downBiasRatio),
-            spreadThreshold: CGFloat(config.settings.spreadThreshold),
-            minSwipeDistance: CGFloat(config.settings.minSwipeDistance),
-            downBiasMinAbsDy: CGFloat(config.settings.downBiasMinAbsDy),
-            spreadToDistanceRatio: CGFloat(config.settings.spreadToDistanceRatio),
-            liveTriggerDistance: CGFloat(config.settings.liveTriggerDistance),
-            logLevel: config.settings.logLevel
-        )
-        setupRecognizer()
+    var accessibilityGranted: Bool { AXIsProcessTrusted() }
+
+    func start(configuration: AutomationConfiguration) {
+        stop()
+        self.configuration = configuration
+        errorMessages = []
+        configurationWarnings = ConfigurationValidator.warnings(for: configuration)
+        DiagnosticLog.shared.write("[Engine] 应用配置：\(configuration.rules.count) 条规则")
+        DiagnosticLog.shared.write("[Permission] 辅助功能：\(accessibilityGranted ? "已授权" : "未授权")")
+        DiagnosticLog.shared.write("[Permission] 事件监听：\(CGPreflightListenEventAccess() ? "允许" : "拒绝")；事件发送：\(CGPreflightPostEventAccess() ? "允许" : "拒绝")")
+        executor = ActionExecutor(debounceMilliseconds: configuration.settings.debounceMilliseconds)
+        touchRestartAttempts = 0
+        configureTrackpad()
+        configureKeyboard()
+        updateRunningState()
     }
 
-    private func setupRecognizer() {
-        recognizer.onGesture = { [weak self] event in
-            self?.handleGesture(event) == true
-        }
+    func apply(configuration: AutomationConfiguration) {
+        start(configuration: configuration)
     }
 
-    func start() throws {
-        print("[GestureDaemon] 正在启动...")
-        print("[GestureDaemon] 已加载 \(config.gestures.count) 个手势映射, \(config.hotkeys.count) 个热键映射")
+    func testActions(for rule: AutomationRule) {
+        DiagnosticLog.shared.write("[Rule] 手动测试：\(rule.name)")
+        execute(rule)
+    }
 
-        // 检查辅助功能权限（CGEventPostToPid / CGEvent.tapCreate 都需要）
+    func stop() {
+        hotkeyListener?.stop()
+        hotkeyListener = nil
+        touchService?.stop()
+        touchService = nil
+        publicGestureProvider?.stop()
+        publicGestureProvider = nil
+        recognizer = nil
+        executor = nil
+        lastTriggerTimes.removeAll()
+        isRunning = false
+        trackpadAvailable = false
+        trackpadMode = "未启动"
+        keyboardAvailable = false
+    }
+
+    func requestAccessibilityPermission() {
+        DiagnosticLog.shared.write("[Permission] 请求辅助功能授权")
         let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-        let trusted = AXIsProcessTrustedWithOptions(options)
-        if !trusted {
-            print("[GestureDaemon] ⚠️ 需要辅助功能权限才能发送按键")
-            print("[GestureDaemon] 前往: 系统设置 → 隐私与安全性 → 辅助功能")
-            print("[GestureDaemon] 添加以下路径后重新运行:")
-            print("[GestureDaemon]   \(CommandLine.arguments[0])")
+        _ = AXIsProcessTrustedWithOptions(options)
+    }
+
+    func openAccessibilitySettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+            NSWorkspace.shared.open(url)
         }
+    }
 
-        touchListener = try TouchListener { [weak self] touches, timestamp in
-            self?.recognizer.processTouches(touches, timestamp: timestamp)
+    private func configureTrackpad() {
+        let trackpadRules = configuration.rules.filter { $0.isEnabled && !$0.actions.isEmpty && $0.category == .trackpad }
+        guard !trackpadRules.isEmpty else { return }
+        let recognizer = GestureRecognizer()
+        let s = configuration.settings
+        recognizer.tuning = GestureTuning(
+            diagonalRejectRatio: CGFloat(s.diagonalRejectRatio), downBiasRatio: CGFloat(s.downBiasRatio),
+            spreadThreshold: CGFloat(s.spreadThreshold), minSwipeDistance: CGFloat(s.minimumSwipeDistance),
+            downBiasMinAbsDy: CGFloat(s.downBiasMinimumY), spreadToDistanceRatio: CGFloat(s.spreadToDistanceRatio),
+            liveTriggerDistance: CGFloat(s.liveTriggerDistance), logLevel: s.logLevel
+        )
+        recognizer.onGesture = { [weak self] event in
+            guard let self else { return false }
+            if Thread.isMainThread { return self.handleGesture(event) }
+            return DispatchQueue.main.sync { self.handleGesture(event) }
         }
-
-        hotkeyListener = HotkeyListener(mappings: config.hotkeys, keySimulator: keySimulator)
-        let hotkeyOk = hotkeyListener?.start() ?? true
-        if !hotkeyOk {
-            print("[GestureDaemon] ⚠️ 热键功能启动失败，将继续提供手势功能")
+        self.recognizer = recognizer
+        if configuration.settings.useCompatibilityTrackpadMode {
+            startPublicFallback(reason: "已手动选择兼容模式")
+            return
         }
+        launchAdvancedTouchService()
+    }
 
-        print("[GestureDaemon] 手势映射引擎已启动，监听触控板事件中...")
-        print("[GestureDaemon] 按 Ctrl+C 退出")
+    private func configureKeyboard() {
+        let keyboardRules = configuration.rules.filter { $0.isEnabled && !$0.actions.isEmpty && $0.category == .keyboard }
+        guard !keyboardRules.isEmpty else { return }
+        let listener = HotkeyListener(rules: keyboardRules) { [weak self] rule in
+            DispatchQueue.main.async { self?.execute(rule) }
+        }
+        hotkeyListener = listener
+        keyboardAvailable = listener.start()
+        if keyboardAvailable {
+            DiagnosticLog.shared.write("[Keyboard] Event Tap 已启动：\(keyboardRules.count) 条规则")
+        } else {
+            errorMessages.append("键盘：无法创建 Event Tap，请检查辅助功能权限")
+            DiagnosticLog.shared.write("[Keyboard] Event Tap 创建失败")
+        }
+        updateRunningState()
+    }
 
-        CFRunLoopRun()
+    private func handleTouchServiceState(_ state: TrackpadProviderState) {
+        switch state {
+        case .starting:
+            trackpadMode = "正在启动高级模式…"
+            DiagnosticLog.shared.write("[Trackpad] 正在启动高级模式")
+        case .advanced:
+            trackpadAvailable = true
+            trackpadMode = "高级模式（原始多指触点）"
+            DiagnosticLog.shared.write("[Trackpad] 高级模式就绪")
+            updateRunningState()
+        case .compatible(let reason):
+            trackpadAvailable = true
+            trackpadMode = "兼容模式（公开事件）"
+            if !reason.isEmpty { appendErrorOnce("触控板已降级：\(reason)") }
+            DiagnosticLog.shared.write("[Trackpad] 进入兼容模式：\(reason)")
+            updateRunningState()
+        case .failed(let reason):
+            if touchRestartAttempts < 1 {
+                touchRestartAttempts += 1
+                appendErrorOnce("高级触控板服务异常，正在自动重启一次：\(reason)")
+                DiagnosticLog.shared.write("[Trackpad] 服务异常并重启：\(reason)")
+                touchService?.stop()
+                touchService = nil
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self, self.recognizer != nil else { return }
+                    self.launchAdvancedTouchService()
+                }
+            } else {
+                startPublicFallback(reason: reason)
+            }
+        }
+    }
+
+    private func launchAdvancedTouchService() {
+        guard let recognizer else { return }
+        let service = TouchServiceProvider()
+        service.onFrame = { [weak self, weak recognizer] touches, timestamp in
+            self?.observeTouches(touches)
+            recognizer?.processTouches(touches, timestamp: timestamp)
+        }
+        service.onStateChange = { [weak self] state in self?.handleTouchServiceState(state) }
+        touchService = service
+        do { try service.start() }
+        catch {
+            if touchRestartAttempts < 1 {
+                handleTouchServiceState(.failed(error.localizedDescription))
+            } else {
+                startPublicFallback(reason: error.localizedDescription)
+            }
+        }
+    }
+
+    private func startPublicFallback(reason: String) {
+        touchService?.stop()
+        touchService = nil
+        let provider = PublicGestureProvider()
+        provider.onGesture = { [weak self] event in _ = self?.handleGesture(event) }
+        publicGestureProvider = provider
+        if provider.start() {
+            handleTouchServiceState(.compatible(reason))
+        } else {
+            trackpadAvailable = false
+            trackpadMode = "不可用"
+            appendErrorOnce("触控板：\(reason)；公开事件兼容模式也无法启动")
+            updateRunningState()
+        }
+    }
+
+    private func appendErrorOnce(_ message: String) {
+        if !errorMessages.contains(message) { errorMessages.append(message) }
+    }
+
+    private func updateRunningState() {
+        isRunning = trackpadAvailable || keyboardAvailable
     }
 
     private func handleGesture(_ event: GestureEvent) -> Bool {
-        for mapping in config.gestures {
-            guard mapping.fingers == event.fingers else { continue }
-            guard mapping.direction == event.direction || isFlexibleDownMatch(event, mapping: mapping) else { continue }
-            guard meetsDistanceRequirement(event, mapping: mapping) else {
-                if recognizer.tuning.logLevel == "debug" {
-                    fputs("[GestureDaemon] 距离不足未触发\"\(mapping.name)\" | 实际=\(String(format: "%.3f", downwardDistance(event))) 需≥\(String(format: "%.2f", mapping.minDistance))\n", stderr)
-                }
-                continue
-            }
-
-            let name = mapping.name
-            let keys = mapping.keys
-            if keySimulator.trigger(keys: keys, gestureName: name) {
-                print("[GestureDaemon] 手势触发: \(name) → \(keys.joined(separator: "+"))")
-                return true
-            }
+        lastGestureObservation = "\(event.fingers) 指 · \(event.direction.title) · 距离 \(String(format: "%.3f", event.distance))"
+        DiagnosticLog.shared.write("[Gesture] \(lastGestureObservation)")
+        guard let rule = configuration.rules.first(where: { rule in
+            guard rule.isEnabled, !rule.actions.isEmpty, case .trackpad(let trigger) = rule.trigger else { return false }
+            guard trigger.fingers == event.fingers, trigger.direction == event.direction else { return false }
+            let distance = trigger.direction == .down ? max(0, -event.dy) : event.distance
+            return distance >= CGFloat(trigger.minimumDistance) && rule.applicationScope.matches(bundleIdentifier: frontmostBundleIdentifier)
+        }) else {
+            DiagnosticLog.shared.write("[Gesture] 没有匹配的启用规则")
             return false
         }
+        execute(rule)
+        return true
+    }
 
-        if recognizer.tuning.logLevel == "debug" {
-            let downMapping = config.gestures.first { $0.fingers == event.fingers && $0.direction == .down }
-            if downMapping != nil {
-                fputs("[GestureDaemon] 方向不匹配 | 识别为:\(event.direction) 需:down | dx=\(String(format: "%.4f", event.dx)) dy=\(String(format: "%.4f", event.dy))\n", stderr)
-            }
+    private func execute(_ rule: AutomationRule) {
+        guard rule.applicationScope.matches(bundleIdentifier: frontmostBundleIdentifier) else { return }
+        if rule.actions.contains(where: { $0.kind == .keyboardShortcut }) && !accessibilityGranted {
+            let message = "规则“\(rule.name)”已匹配，但辅助功能未授权，无法发送按键"
+            lastEvent = message
+            appendErrorOnce(message)
+            DiagnosticLog.shared.write("[Permission] \(message)")
+            requestAccessibilityPermission()
+            return
         }
-        return false
+        let now = ProcessInfo.processInfo.systemUptime
+        let debounce = TimeInterval(max(0, configuration.settings.debounceMilliseconds)) / 1000
+        if let last = lastTriggerTimes[rule.id], now - last < debounce { return }
+        lastTriggerTimes[rule.id] = now
+        lastEvent = "\(rule.name) · \(Date().formatted(date: .omitted, time: .standard))"
+        DiagnosticLog.shared.write("[Rule] 触发：\(rule.name)")
+        executor?.execute(rule.actions, ruleName: rule.name)
     }
 
-    private func isFlexibleDownMatch(_ event: GestureEvent, mapping: GestureMapping) -> Bool {
-        guard mapping.direction == .down, event.fingers == mapping.fingers else { return false }
-        guard event.dy < 0 else { return false }
-        guard downwardDistance(event) >= CGFloat(mapping.minDistance) else { return false }
-        return abs(event.dy) >= abs(event.dx) * CGFloat(config.settings.downBiasRatio)
+    private var frontmostBundleIdentifier: String? {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
     }
 
-    private func meetsDistanceRequirement(_ event: GestureEvent, mapping: GestureMapping) -> Bool {
-        if mapping.direction == .down {
-            return event.dy < 0 && downwardDistance(event) >= CGFloat(mapping.minDistance)
-        }
-        return event.distance >= CGFloat(mapping.minDistance)
-    }
-
-    private func downwardDistance(_ event: GestureEvent) -> CGFloat {
-        max(0, -event.dy)
+    private func observeTouches(_ touches: [ActiveTouch]) {
+        let now = ProcessInfo.processInfo.systemUptime
+        guard touches.isEmpty || now - lastTouchObservationTime >= 0.1 else { return }
+        lastTouchObservationTime = now
+        lastTouchObservation = touches.isEmpty ? "触点已全部抬起" : "正在接收 \(touches.count) 个触点"
     }
 }

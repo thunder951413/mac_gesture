@@ -5,4 +5,5 @@
 .workmate/
 *.xcodeproj/
 DerivedData/
+dist/
 Package.resolved

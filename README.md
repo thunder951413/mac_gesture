@@ -1,344 +1,127 @@
-# GestureDaemon
+# Gesture
 
-macOS 触控板手势 + 键盘热键映射引擎。
-
-通过触控板手势（多指滑动/捏合）或键盘组合键触发自定义按键序列，发送到当前活跃 App。
-
-> macOS 13+ | Swift | CoreGraphics | MultitouchSupport.framework
-
----
+Gesture 是一个原生 macOS 触控板手势与组合键自动化工具。它以菜单栏应用运行，通过可视化界面创建“触发器 → App 范围 → 动作”规则，不再需要手动编辑配置文件。
 
 ## 功能
 
-- **触控板手势识别** — 多指滑动方向、捏合/张开检测，映射为任意按键
-- **键盘热键重映射** — 监听组合键，拦截并替换为其他按键
-- **多策略设备注册** — 兼容 macOS 13–26 各版本 MultitouchSupport 框架
+- 2–5 指上、下、左、右滑动，以及 4–5 指捏合/张开
+- 全局组合键重映射，支持按下/松开触发和按键连发策略
+- 规则可限定为所有 App、仅指定 App 或排除指定 App
+- 一条规则可以依次执行多个动作
+- 支持发送快捷键、打开网址、打开应用、Shell、AppleScript 和延时
+- 菜单栏启停、运行状态、辅助功能权限诊断
+- 私有触控板读取运行在独立辅助进程中，异常不会带崩主应用
+- 辅助进程异常时自动重启一次，再自动切换到公开 API 兼容模式
+- 可手动强制兼容模式，完全不加载私有触点框架
+- 规则冲突、空动作和无效快捷键配置诊断
+- 状态页实时显示最近触点、最近识别结果和最近触发规则
+- 诊断日志保存到 `~/Library/Logs/Gesture/gesture.log`
+- 旧版 `gestures/hotkeys/settings` JSON 自动迁移到 schema v2
+- 配置原子保存到 `~/.gesture/config.json`，保存后立即热应用
 
----
+界面结构参考了 BetterTouchTool 的全局/App 专属触发器组织方式，以及 Keyboard Maestro 的触发器与动作分层：
+
+- [BetterTouchTool: Global and App-Specific Triggers](https://docs.folivora.ai/docs/configuration/global-vs-app-specific/)
+- [BetterTouchTool: Basic Preferences Overview](https://docs.folivora.ai/docs/configuration/basic-overview/)
+- [Keyboard Maestro: Triggers](https://wiki.keyboardmaestro.com/Triggers)
+
+## 构建与运行
+
+要求 macOS 13 或更新版本，以及 Swift 5.9 或更新版本。
+
+```bash
+make build       # Debug 编译
+make run         # 直接运行 Debug 版本
+make bundle      # 生成 dist/Gesture.app
+make run-app     # 构建并打开 app
+make install-app # 安装到 /Applications/Gesture.app
+```
+
+安装后，在“系统设置 → 隐私与安全性 → 辅助功能”中允许 Gesture。全局按键监听和按键模拟都依赖此权限。
+
+打包时会优先使用钥匙串中可用的 Apple Development 签名，使辅助功能授权在后续本地重新构建时保持稳定；没有可用证书时才回退到临时签名。
+
+## 使用
+
+1. 打开 Gesture 设置窗口。
+2. 在左侧选择“触控板”或“键盘”，点击工具栏 `+` 新建规则。
+3. 设置触发手势或直接录制快捷键。
+4. 可选：将规则限制到指定应用。
+5. 添加一个或多个动作。
+6. 点击“保存并应用”。
+
+菜单栏手掌图标可以停止/启动引擎、查看最近触发并重新打开设置窗口。
+
+## 配置格式
+
+配置由程序管理，仍使用可移植的 JSON：
+
+```json
+{
+  "schemaVersion": 2,
+  "rules": [
+    {
+      "id": "7C278BCE-C3E6-48D4-A736-B282A70864D9",
+      "name": "三指下滑关闭窗口",
+      "isEnabled": true,
+      "trigger": {
+        "type": "trackpad",
+        "trackpad": {
+          "fingers": 3,
+          "direction": "down",
+          "minimumDistance": 0.22
+        }
+      },
+      "applicationScope": {
+        "mode": "all",
+        "bundleIdentifiers": []
+      },
+      "actions": [
+        {
+          "id": "B9F413F0-F16E-4476-91F4-7F7F46A14C34",
+          "kind": "keyboardShortcut",
+          "keys": ["cmd", "w"],
+          "value": "",
+          "delayMilliseconds": 250
+        }
+      ]
+    }
+  ],
+  "settings": {}
+}
+```
+
+正常使用无需手工修改。写入无效 JSON 时，程序不会覆盖原文件，而会载入内置默认配置。
 
 ## 架构
 
-```
-┌──────────────────────────────────────────────────────┐
-│                    GestureDaemon                      │
-│  ├── TouchListener  ← MultitouchSupport.framework    │
-│  ├── GestureRecognizer  → 方向/距离/指数量化          │
-│  ├── HotkeyListener   ← CGEventTap                   │
-│  ├── KeySimulator     → CGEventPost (.cghidEventTap) │
-│  └── Config           ← config.json                  │
-└──────────────────────────────────────────────────────┘
-```
+```text
+TrackpadInput ─┐
+               ├─> GestureDaemon / Rule matching ─> ActionExecutor
+KeyboardInput ─┘               │
+                               └─> ApplicationScope
 
-### 模块说明
+SwiftUI settings <─> ConfigurationStore <─> ~/.gesture/config.json
 
-| 文件 | 职责 |
-|------|------|
-| `main.swift` | 入口：信号处理、配置加载、启动守护进程 |
-| `GestureDaemon.swift` | 主控制器：编排 TouchListener + HotkeyListener |
-| `Config.swift` | 配置模型：GestureMapping、HotkeyMapping |
-| `TouchListener.swift` | 通过私有框架 MultitouchSupport 接收触控板原始触摸数据 |
-| `GestureRecognizer.swift` | 识别手势：指数量、滑动方向、距离、捏合/张开 |
-| `HotkeyListener.swift` | 通过 CGEventTap 拦截键盘事件，匹配热键规则并替换 |
-| `KeySimulator.swift` | 通过 CGEvent 发送按键事件到当前 App |
-
----
-
-## 快速开始
-
-### 1. 编译
-
-```bash
-make build      # debug 构建
-make release    # release 构建
+Gesture.app ── JSON Lines ──> GestureTouchService ──> MultitouchSupport
+      └─────────────────────> Public NSEvent fallback
 ```
 
-### 2. 运行
-
-```bash
-make run        # 使用 config.json
-# 或指定配置:
-swift run config.json
-```
-
-### 3. 设置权限
-
-首次运行需要授予**辅助功能权限**：
-
-```
-系统设置 → 隐私与安全性 → 辅助功能
-  → 将 Terminal.app（或编译后的二进制）添加到列表
-  → 重新运行
-```
-
-### 4. 安装（可选）
-
-```bash
-make install    # 安装到 /usr/local/bin/gesture-daemon
-gesture-daemon config.json
-```
-
----
-
-## 配置
-
-编辑 `config.json`，包含手势映射与热键映射两大部分。
-
-### 手势映射 `gestures`
-
-```json
-{
-  "gestures": [
-    {
-      "name": "三指下滑关闭窗口",
-      "fingers": 3,
-      "direction": "down",
-      "minDistance": 0.22,
-      "keys": ["cmd", "w"]
-    }
-  ]
-}
-```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `name` | String | 映射名称（仅用于日志） |
-| `fingers` | Int | 手指数量（2–5） |
-| `direction` | String | 方向：`up` `down` `left` `right` `pinch` `spread` |
-| `minDistance` | Double | 最小触发距离（0.0–1.0），下滑手势按向下垂直距离计算，避免误触 |
-| `keys` | [String] | 触发的按键序列 |
-
-### 热键映射 `hotkeys`
-
-```json
-{
-  "hotkeys": [
-    {
-      "name": "Ctrl+Shift+A → Cmd+C",
-      "when": ["ctrl", "shift", "a"],
-      "send": ["cmd", "c"]
-    }
-  ]
-}
-```
-
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `name` | String | 映射名称（仅用于日志） |
-| `when` | [String] | 触发组合键：修饰键 + 一个普通键 |
-| `send` | [String] | 替换发送的按键序列 |
-
-### 通用设置 `settings`
-
-```json
-{
-  "settings": {
-    "debounceMs": 150,
-    "logLevel": "info",
-    "diagonalRejectRatio": 0.95,
-    "downBiasRatio": 0.35,
-    "spreadThreshold": 0.03,
-    "minSwipeDistance": 0.01,
-    "downBiasMinAbsDy": 0.08,
-    "spreadToDistanceRatio": 2.0,
-    "liveTriggerDistance": 0.06
-  }
-}
-```
-
-| 字段 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `debounceMs` | Int | 150 | 防抖毫秒数，同一映射在此时间内不会重复触发 |
-| `logLevel` | String | "info" | 日志级别：`info` `debug` |
-| `diagonalRejectRatio` | Double | 0.95 | 对角线拒绝阈值：次轴/主轴 ≥ 此值则忽略（防误触） |
-| `downBiasRatio` | Double | 0.35 | 下偏修正：左右滑动中 `\|dy\|/\|dx\|` ≥ 此值则修正为 down |
-| `spreadThreshold` | Double | 0.03 | 捏合/张开识别的最小 spread 变化量 |
-| `minSwipeDistance` | Double | 0.01 | 滑动识别的最小位移距离，低于此值忽略 |
-| `downBiasMinAbsDy` | Double | 0.08 | 下偏修正需满足的最小 `\|dy\|`，避免微小抖动误修正 |
-| `spreadToDistanceRatio` | Double | 2.0 | spread 变化量需超过位移距离的此倍数才判定为 pinch/spread |
-| `liveTriggerDistance` | Double | 0.06 | 手指未抬起时的实时触发距离，达到即触发（无需抬手） |
-
-> 高级参数均有默认值，旧配置无需改动即可运行。仅当需要调优手势灵敏度/误触时按需调整。
-
-### 支持的按键名称
-
-**修饰键：** `cmd` `command` `shift` `option` `opt` `alt` `ctrl` `control` `fn` `function`
-
-**普通键：** `a`–`z` `0`–`9` `space` `return` `enter` `tab` `delete` `backspace` `escape` `esc`
-`f1`–`f12` `left` `right` `up` `down` `home` `end` `pageup` `pagedown` `-` `=` `[` `]` `\` `;` `'` `,` `.` `/` `` ` ``
-
-### 配置查看 UI（可选）
-
-仓库根目录的 `config.html` 是一个纯前端的配置可视化原型，浏览器直接打开即可查看当前 `config.json` 的手势/热键映射表。它不修改文件，仅用于本地预览。
-
----
-
-## 触控板手势说明
-
-### 支持的识别
-
-| 手势 | 示例 |
-|------|------|
-| 2–5 指向一个方向滑动 | 三指下滑、四指上滑 |
-| 捏合 / 张开（4指以上） | 五指捏合显示桌面 |
-
-手势识别基于触控板坐标归一化值，通过计算质心位移方向和距离来判断。
-
-### 调试模式
-
-```json
-{
-  "settings": { "logLevel": "debug" }
-}
-```
-
-在 debug 级别下，每次手势识别都会输出手指数和方向：
-
-```
-[Gesture] 3指 识别为 down | dx=0.0123 dy=-0.2340 距离:0.234
-```
-
----
-
-## 构建与安装
-
-### 命令
-
-| 命令 | 说明 |
-|------|------|
-| `make build` | Debug 构建 |
-| `make release` | Release 构建 |
-| `make run` | Debug 构建并运行 |
-| `make run-release` | Release 构建并运行 |
-| `make install` | 安装到 `/usr/local/bin/gesture-daemon` |
-| `make clean` | 清理构建产物 |
-
-### 系统要求
-
-- macOS 13+
-- 触控板（MacBook 内置或 Magic Trackpad）
-- 辅助功能权限（用于发送按键 + 创建 EventTap）
-
----
-
-## 服务管理（后台运行 + 开机自启）
-
-将 GestureDaemon 安装为 **LaunchAgent**，后台静默运行、开机自动启动。
-
-### 安装服务
-
-```bash
-make install-service
-```
-
-这个命令会：
-1. Release 构建并安装到 `/usr/local/bin/gesture-daemon`
-2. 创建 `~/Library/LaunchAgents/com.gesturedaemon.plist`
-3. 通过 `launchctl` 注册并启动服务
-4. 日志输出到 `/tmp/gesture-daemon.log` 和 `/tmp/gesture-daemon.err`
-
-首次使用需授予辅助功能权限：
-
-```
-系统设置 → 隐私与安全性 → 辅助功能
-  → 添加: /usr/local/bin/gesture-daemon
-  → 添加后重启服务: make service-stop && make service-start
-```
-
-### 管理命令
-
-| 命令 | 说明 |
-|------|------|
-| `make service-status` | 查看服务运行状态 |
-| `make service-logs` | 查看最近日志 |
-| `make service-start` | 启动服务 |
-| `make service-stop` | 停止服务 |
-| `make install-service` | 安装并启动服务 |
-| `make uninstall-service` | 卸载服务 |
-
-### 直接管理（底层）
-
-如果偏好手动管理，也可以直接用 launchctl：
-
-```bash
-# 加载
-launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gesturedaemon.plist
-
-# 卸载
-launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.gesturedaemon.plist
-
-# 查看状态
-launchctl print gui/$(id -u)/com.gesturedaemon
-```
-
----
-
-## 常见问题
-
-### 启动失败：注册失败
-
-```
-[GestureDaemon] 启动失败: 注册失败。如需重置触控板驱动状态请重启电脑
-```
-
-MultitouchSupport 框架回调注册失败。解决办法（按优先级）：
-1. **重启电脑** — 重置触控板驱动内部状态
-2. **重新插拔外接触控板** — 如果是 Magic Trackpad
-
-### 触控板无响应
-
-1. 确认触控板已连接并正常工作
-2. 检查是否有其他软件也在占用触控板事件流
-3. 尝试重启电脑
-
-### 热键监听器启动失败
-
-```
-[HotkeyListener] ❌ EventTap 创建失败，热键功能不可用
-```
-
-需要辅助功能权限：
-
-```
-系统设置 → 隐私与安全性 → 辅助功能
-  → 添加本程序（或 Terminal）
-```
-
-授权后重新启动。
-
-### 按键未发送到目标 App
-
-确保已在系统设置中授予**辅助功能权限**。该权限是 `CGEvent.post` 和 `CGEvent.tapCreate` 所必需的。
-
-### 热键触发后无限循环
-
-`HotkeyListener` 通过检查事件源的进程 ID 来防止循环——`KeySimulator` 发出的按键携带当前进程的 PID，`HotkeyListener` 会跳过来自本进程的事件。
-
----
-
-## 技术细节
-
-### MultitouchSupport 私有框架
-
-通过 `dlopen` 动态加载，`dlsym` 解析符号，避免静态链接私有框架导致的兼容性问题。
-
-回调签名（macOS 14+）：
-
-```c
-int callback(MTDeviceRef device, MTFinger *fingers, int count, double timestamp, int frame);
-```
-
-注册流程：`MTRegisterContactFrameCallback` → `MTDeviceStart`（**必须先注册再启动**）。
-
-### CGEventTap
-
-热键拦截使用 `CGEvent.tapCreate` 在系统事件队列头部插入监听点，在事件到达目标 App 之前完成拦截和替换。
-
-### CGEvent 发键
-
-`KeySimulator` 使用 `CGEventSource(stateID: .hidSystemState)` 创建事件源，确保发出的按键携带正确的进程 ID，用于防循环检测。
-
----
-
-## License
-
-MIT
+主要模块：
+
+- `AutomationModels.swift`：schema v2 规则、触发器、范围和动作模型
+- `ConfigurationStore.swift`：加载、旧配置迁移、原子保存
+- `TouchListener.swift`：触控板原始触点输入
+- `GestureTouchService`：隔离私有触控板框架的辅助进程
+- `TrackpadProviders.swift`：辅助进程通信、崩溃恢复和公开 API 兼容后端
+- `GestureRecognizer.swift`：多指手势识别状态
+- `HotkeyListener.swift`：完整 key-down/key-up Event Tap
+- `GestureDaemon.swift`：输入模块生命周期与规则匹配
+- `ActionExecutor.swift`：串行动作执行
+- `SettingsViews.swift` / `RuleEditorViews.swift`：原生设置界面
+
+## 限制
+
+Apple 没有提供能够读取全部原始触点的公开 API，因此高级触控板模式使用系统私有的 `MultitouchSupport.framework`。该框架被隔离在 `GestureTouchService` 辅助进程内；连续异常数据会触发熔断，服务崩溃后主应用会重启一次并自动降级。公开 API 兼容模式不会加载该框架，但只能可靠识别两指滚动、捏合和系统 swipe。键盘模块使用公开的 CoreGraphics Event Tap。
+
+Shell 和 AppleScript 动作以当前用户权限执行。只添加自己信任的脚本。

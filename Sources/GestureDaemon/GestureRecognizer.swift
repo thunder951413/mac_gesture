@@ -1,5 +1,6 @@
 import Foundation
 import CoreGraphics
+import GestureTouchCore
 
 struct GestureEvent {
     let fingers: Int
@@ -149,7 +150,7 @@ final class GestureRecognizer {
             let major = max(absDx, absDy)
 
             if major > 0 && minor >= major * tuning.diagonalRejectRatio {
-                if logDiagnostics {
+                if logDiagnostics && tuning.logLevel == "debug" {
                     fputs("[Gesture] \(fingers)指 对角线忽略 | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) 次轴/主轴=\(String(format: "%.2f", minor/major)) 需<\(String(format: "%.2f", tuning.diagonalRejectRatio)) | 距离=\(String(format: "%.3f", totalDistance))\n", stderr)
                 }
                 return nil
@@ -167,26 +168,24 @@ final class GestureRecognizer {
                 && absDy > absDx * tuning.downBiasRatio
                 && absDy > tuning.downBiasMinAbsDy {
                 direction = .down
-                if logDiagnostics {
+                if logDiagnostics && tuning.logLevel == "debug" {
                     fputs("[Gesture] \(fingers)指 下偏修正: left/right→down | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) |dy|/|dx|=\(String(format: "%.2f", absDx > 0 ? absDy/absDx : 0)) ≥\(String(format: "%.2f", tuning.downBiasRatio))\n", stderr)
                 }
             }
         } else {
-            if logDiagnostics {
+            if logDiagnostics && tuning.logLevel == "debug" {
                 fputs("[Gesture] \(fingers)指 距离太短忽略 | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) 距离=\(String(format: "%.4f", totalDistance)) 需>\(String(format: "%.4f", tuning.minSwipeDistance))\n", stderr)
             }
             return nil
         }
 
-        if logDiagnostics {
+        if logDiagnostics && tuning.logLevel == "debug" {
             fputs("[Gesture] \(fingers)指 识别为 \(direction) | dx=\(String(format: "%.4f", dx)) dy=\(String(format: "%.4f", dy)) 距离=\(String(format: "%.3f", totalDistance))\n", stderr)
         }
 
-        if logDiagnostics && tuning.logLevel == "debug" {
-            fputs("[Gesture] \(fingers)指 \(direction) 距离:\(String(format: "%.3f", totalDistance))\n", stderr)
-        }
-
-        return GestureEvent(fingers: fingers, direction: direction, distance: totalDistance, dx: dx, dy: dy)
+        let recognizedDistance: CGFloat = (direction == .pinch || direction == .spread)
+            ? abs(spreadDelta) : totalDistance
+        return GestureEvent(fingers: fingers, direction: direction, distance: recognizedDistance, dx: dx, dy: dy)
     }
 
     private func reset() {

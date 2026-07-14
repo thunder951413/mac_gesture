@@ -1,39 +1,56 @@
 {
-  "gestures": [
+  "schemaVersion": 2,
+  "rules": [
     {
+      "id": "44DCE223-F0CD-4D53-A68F-4FD585E3D3D3",
       "name": "三指下滑关闭窗口",
-      "fingers": 3,
-      "direction": "down",
-      "minDistance": 0.22,
-      "keys": ["Cmd","w"]
-    }
-  ],
-  "hotkeys": [
-    {
-      "name": "Cmd+H → Left",
-      "when": ["cmd", "h"],
-      "send": ["left"]
+      "isEnabled": true,
+      "trigger": {
+        "type": "trackpad",
+        "trackpad": { "fingers": 3, "direction": "down", "minimumDistance": 0.22 }
+      },
+      "applicationScope": { "mode": "all", "bundleIdentifiers": [] },
+      "actions": [
+        {
+          "id": "B11CD17B-BF08-46A4-8347-92960665AE9B",
+          "kind": "keyboardShortcut",
+          "keys": ["cmd", "w"],
+          "value": "",
+          "delayMilliseconds": 250
+        }
+      ]
     },
     {
-      "name": "Cmd+J → Down",
-      "when": ["cmd", "j"],
-      "send": ["down"]
-    },
-    {
-      "name": "Cmd+K → Up",
-      "when": ["cmd", "k"],
-      "send": ["up"]
-    },
-    {
-      "name": "Cmd+L → Right",
-      "when": ["cmd", "l"],
-      "send": ["right"]
+      "id": "2BBA7E32-D2FD-44AB-B313-90C8BE371916",
+      "name": "⌘J → 下方向键",
+      "isEnabled": true,
+      "trigger": {
+        "type": "keyboard",
+        "keyboard": { "keys": ["cmd", "j"], "phase": "keyDown", "allowRepeat": false }
+      },
+      "applicationScope": { "mode": "all", "bundleIdentifiers": [] },
+      "actions": [
+        {
+          "id": "6458CCB1-C3E0-4F4C-A71B-0546551E2A26",
+          "kind": "keyboardShortcut",
+          "keys": ["down"],
+          "value": "",
+          "delayMilliseconds": 250
+        }
+      ]
     }
   ],
   "settings": {
-    "debounceMs": 150,
+    "launchAtLogin": false,
+    "useCompatibilityTrackpadMode": false,
+    "debounceMilliseconds": 150,
     "logLevel": "info",
     "diagonalRejectRatio": 0.95,
-    "downBiasRatio": 0.35
+    "downBiasRatio": 0.35,
+    "spreadThreshold": 0.03,
+    "minimumSwipeDistance": 0.01,
+    "downBiasMinimumY": 0.08,
+    "spreadToDistanceRatio": 2.0,
+    "liveTriggerDistance": 0.06
   }
 }

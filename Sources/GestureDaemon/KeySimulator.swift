@@ -40,31 +40,11 @@ final class KeySimulator {
             lock.unlock()
         }
 
-        let source = CGEventSource(stateID: .hidSystemState)
+        // 使用独立事件源并显式设置 flags，避免触发热键仍被物理按住的
+        // Cmd/Option 等修饰键泄漏到替换动作中（例如 Down 变成 Cmd+Down）。
+        let source = CGEventSource(stateID: .privateState)
+        let flags = Self.modifierFlags(for: modifiers)
         var allOk = true
-        var modifierKeyCodes: [CGKeyCode] = []
-
-        for mod in modifiers {
-            guard let keyCode = Self.modKeyCode(name: mod) else {
-                fputs("[KeySimulator] 未知修饰键: \(mod)\n", stderr)
-                allOk = false
-                continue
-            }
-            modifierKeyCodes.append(keyCode)
-        }
-
-        guard allOk else { return false }
-
-        for keyCode in modifierKeyCodes {
-            guard let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true) else {
-                fputs("[KeySimulator] 创建修饰键按下事件失败: \(keyCode)\n", stderr)
-                allOk = false
-                continue
-            }
-            down.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
-            down.post(tap: .cghidEventTap)
-            usleep(6000)
-        }
 
         for key in regularKeys {
             guard let keyCode = Self.keyCodeFor(name: key) else {
@@ -80,23 +60,14 @@ final class KeySimulator {
                 continue
             }
 
+            down.flags = flags
+            up.flags = flags
             down.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
             up.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
-            down.post(tap: .cghidEventTap)
-            usleep(10000)
-            up.post(tap: .cghidEventTap)
-            usleep(6000)
-        }
-
-        for keyCode in modifierKeyCodes.reversed() {
-            guard let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
-                fputs("[KeySimulator] 创建修饰键抬起事件失败: \(keyCode)\n", stderr)
-                allOk = false
-                continue
-            }
-            up.setIntegerValueField(.eventSourceUnixProcessID, value: Int64(myPID))
-            up.post(tap: .cghidEventTap)
-            usleep(6000)
+            down.post(tap: .cgSessionEventTap)
+            usleep(1_200)
+            up.post(tap: .cgSessionEventTap)
+            usleep(400)
         }
 
         guard allOk else { return false }

@@ -27,6 +27,10 @@ struct GestureApp: App {
 }
 
 final class GestureAppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         NotificationCenter.default.post(name: .gestureShowSettings, object: nil)
         return true
@@ -43,7 +47,8 @@ final class AppModel: ObservableObject {
     let engine = GestureDaemon()
     private var subscriptions = Set<AnyCancellable>()
     private lazy var statusItemController = StatusItemController(model: self)
-    private lazy var settingsWindowController = SettingsWindowController(model: self)
+    private lazy var settingsWindowCoordinator = SettingsWindowCoordinator(model: self)
+    private var hasPresentedInitialWindow = false
 
     init() {
         store = ConfigurationStore()
@@ -55,7 +60,7 @@ final class AppModel: ObservableObject {
         NotificationCenter.default.publisher(for: NSApplication.didFinishLaunchingNotification)
             .sink { [weak self] _ in
                 self?.applyAppearanceSettings()
-                self?.showSettingsWindow()
+                self?.showInitialSettingsWindowIfNeeded()
             }
             .store(in: &subscriptions)
         NotificationCenter.default.publisher(for: .gestureShowSettings)
@@ -65,7 +70,7 @@ final class AppModel: ObservableObject {
         engine.start(configuration: store.configuration)
         DispatchQueue.main.async { [weak self] in
             self?.applyAppearanceSettings()
-            self?.showSettingsWindow()
+            self?.showInitialSettingsWindowIfNeeded()
         }
         if !engine.accessibilityGranted {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
@@ -101,13 +106,19 @@ final class AppModel: ObservableObject {
     }
 
     func showSettingsWindow() {
-        settingsWindowController.show()
+        settingsWindowCoordinator.show()
     }
 
     private func saveAppearanceAndApply() {
         store.saveReportingError()
         guard store.lastError == nil else { return }
         applyAppearanceSettings()
+    }
+
+    private func showInitialSettingsWindowIfNeeded() {
+        guard !hasPresentedInitialWindow else { return }
+        hasPresentedInitialWindow = true
+        showSettingsWindow()
     }
 
     private func applyAppearanceSettings() {
@@ -119,9 +130,9 @@ final class AppModel: ObservableObject {
         // 切换 regular/accessory 会让 SwiftUI 窗口短暂失去前台身份。
         // 下一轮 RunLoop 恢复原有可见窗口，避免用户感觉设置页“跳走”。
         DispatchQueue.main.async {
-            visibleWindows.forEach { $0.orderFrontRegardless() }
-            visibleWindows.first(where: { $0.canBecomeKey })?.makeKey()
             activateGestureApp()
+            visibleWindows.forEach { $0.orderFront(nil) }
+            visibleWindows.first(where: { $0.canBecomeKey })?.makeKeyAndOrderFront(nil)
         }
         DiagnosticLog.shared.write("[Appearance] Dock：\(settings.hideDockIcon ? "隐藏" : "显示")；菜单栏：\(settings.hideMenuBarIcon ? "隐藏" : "显示")；policy=\(policy.rawValue)")
     }
@@ -191,11 +202,37 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
 }
 
 @MainActor
-private final class SettingsWindowController: NSWindowController, NSWindowDelegate {
+private final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
+    private weak var model: AppModel?
+    private var window: NSWindow?
+
     init(model: AppModel) {
-        let rootView = SettingsRootView()
-            .environmentObject(model)
-            .frame(minWidth: 900, minHeight: 600)
+        self.model = model
+        super.init()
+    }
+
+    func show() {
+        guard let window = window ?? makeWindow() else { return }
+        self.window = window
+        if window.contentViewController == nil {
+            installContent(in: window)
+        }
+        activateGestureApp()
+        window.makeKeyAndOrderFront(nil)
+        DiagnosticLog.shared.write("[Appearance] 设置窗口已显示：visible=\(window.isVisible)")
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closingWindow = notification.object as? NSWindow,
+              closingWindow === window else { return }
+        // NSHostingController 会安装大量跟踪区域。关闭后立刻拆掉视图树，
+        // 避免不可见窗口继续参与 AppKit 的鼠标/光标跟踪循环。
+        closingWindow.contentViewController = nil
+        DiagnosticLog.shared.write("[Appearance] 设置窗口已关闭，内容视图已释放")
+    }
+
+    private func makeWindow() -> NSWindow? {
+        guard model != nil else { return nil }
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1080, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -204,31 +241,25 @@ private final class SettingsWindowController: NSWindowController, NSWindowDelega
         )
         window.title = "Gesture 设置"
         window.minSize = NSSize(width: 900, height: 600)
+        // 菜单栏应用需要在设置页关闭后继续运行。保留轻量窗口外壳，
+        // 但 windowWillClose 会释放真正昂贵的 SwiftUI 内容树。
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
-        window.contentViewController = NSHostingController(rootView: rootView)
-        window.setAccessibilityRole(.window)
-        window.setAccessibilitySubrole(.standardWindow)
-        window.setAccessibilityLabel("Gesture 设置")
+        installContent(in: window)
         window.setFrameAutosaveName("GestureSettingsWindowV3")
         if window.frame.width < 900 || window.frame.height < 600 {
             window.setContentSize(NSSize(width: 1080, height: 700))
             window.center()
         }
-        super.init(window: window)
         window.delegate = self
+        return window
     }
 
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func show() {
-        guard let window else { return }
-        showWindow(nil)
-        window.orderFrontRegardless()
-        window.makeKey()
-        activateGestureApp()
-        DiagnosticLog.shared.write("[Appearance] 设置窗口已显示：visible=\(window.isVisible)")
+    private func installContent(in window: NSWindow) {
+        guard let model else { return }
+        let rootView = SettingsRootView()
+            .environmentObject(model)
+            .frame(minWidth: 900, minHeight: 600)
+        window.contentViewController = NSHostingController(rootView: rootView)
     }
-
 }

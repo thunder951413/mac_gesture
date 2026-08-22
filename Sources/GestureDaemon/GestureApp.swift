@@ -177,6 +177,13 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         let event = NSMenuItem(title: model.engine.lastEvent, action: nil, keyEquivalent: "")
         event.isEnabled = false
         menu.addItem(event)
+        // 引擎可能仍在运行但触控板已降级，从菜单直接暴露原因，
+        // 不必打开设置页的“诊断”区才能发现。
+        for message in model.engine.errorMessages.prefix(2) {
+            let diagnostic = NSMenuItem(title: Self.truncated(message), action: nil, keyEquivalent: "")
+            diagnostic.isEnabled = false
+            menu.addItem(diagnostic)
+        }
         menu.addItem(.separator())
         menu.addItem(item("打开设置…", action: #selector(openSettings)))
         menu.addItem(item(model.engine.isRunning ? "停止引擎" : "启动引擎", action: #selector(toggleEngine)))
@@ -188,6 +195,10 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
         item.target = self
         return item
+    }
+
+    private static func truncated(_ message: String) -> String {
+        message.count <= 100 ? message : "\(message.prefix(100))…"
     }
 
     @objc private func openSettings() { model?.showSettingsWindow() }

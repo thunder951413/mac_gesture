@@ -28,7 +28,8 @@ public final class TouchListener {
     private let frameworkHandle: UnsafeMutableRawPointer
 
     fileprivate static let maxFingers = 20
-    fileprivate static var frameCount: Int32 = 0
+    // MT 回调在框架内部线程触发，多设备时并发；所有静态与实例帧状态都经此锁串行化。
+    private static let stateLock = NSLock()
 
     // MARK: - Correct callback signatures (macOS 14+ / 26)
 
@@ -74,6 +75,9 @@ public final class TouchListener {
     private static func processTouches(data: UnsafeMutableRawPointer?,
                                         nFingers: Int32, ts: Double,
                                         refcon: UnsafeMutableRawPointer?) {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+
         let listener: TouchListener?
         if let r = refcon {
             listener = Unmanaged<TouchListener>.fromOpaque(r).takeUnretainedValue()
@@ -95,7 +99,6 @@ public final class TouchListener {
             return
         }
 
-        frameCount += 1
         var touches = [ActiveTouch]()
         touches.reserveCapacity(Int(nFingers))
         let p = data.assumingMemoryBound(to: UInt8.self)
@@ -197,7 +200,9 @@ public final class TouchListener {
         guard regular != nil || withRefcon != nil else { throw TouchError("找不到触点回调注册函数") }
 
         deviceArray = arr
+        TouchListener.stateLock.lock()
         TouchListener.activeListener = self
+        TouchListener.stateLock.unlock()
         usesRefconCallback = regular == nil
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         for index in 0..<count {
@@ -230,7 +235,9 @@ public final class TouchListener {
         }
         deviceArray = nil
         devicePointers.removeAll()
+        TouchListener.stateLock.lock()
         TouchListener.activeListener = nil
+        TouchListener.stateLock.unlock()
         fputs("[TouchListener] 资源已回收\n", stderr)
     }
 }

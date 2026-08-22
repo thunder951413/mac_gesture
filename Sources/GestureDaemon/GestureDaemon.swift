@@ -24,6 +24,7 @@ final class GestureDaemon: ObservableObject {
     private var lastTriggerTimes: [UUID: TimeInterval] = [:]
     private var touchRestartAttempts = 0
     private var lastTouchObservationTime: TimeInterval = 0
+    private var lastGestureObservationTime: TimeInterval = 0
 
     var accessibilityGranted: Bool { AXIsProcessTrusted() }
 
@@ -197,18 +198,23 @@ final class GestureDaemon: ObservableObject {
     }
 
     private func handleGesture(_ event: GestureEvent) -> Bool {
-        lastGestureObservation = "\(event.fingers) 指 · \(event.direction.title) · 距离 \(String(format: "%.3f", event.distance))"
-        DiagnosticLog.shared.write("[Gesture] \(lastGestureObservation)")
-        guard let rule = configuration.rules.first(where: { rule in
+        let observation = "\(event.fingers) 指 · \(event.direction.title) · 距离 \(String(format: "%.3f", event.distance))"
+        let matchedRule = configuration.rules.first(where: { rule in
             guard rule.isEnabled, !rule.actions.isEmpty, case .trackpad(let trigger) = rule.trigger else { return false }
             guard trigger.fingers == event.fingers, trigger.direction == event.direction else { return false }
             let distance = trigger.direction == .down ? max(0, -event.dy) : event.distance
             return distance >= CGFloat(trigger.minimumDistance) && rule.applicationScope.matches(bundleIdentifier: frontmostBundleIdentifier)
-        }) else {
-            DiagnosticLog.shared.write("[Gesture] 没有匹配的启用规则")
-            return false
+        })
+        // live-trigger 未命中时识别器每帧重试，观察信息与日志按时间窗节流，
+        // 避免滑动期间高频刷新 UI 与刷写诊断日志。规则匹配与执行不受影响。
+        let now = ProcessInfo.processInfo.systemUptime
+        if now - lastGestureObservationTime >= 0.2 {
+            lastGestureObservationTime = now
+            lastGestureObservation = observation
+            DiagnosticLog.shared.write("[Gesture] \(observation)" + (matchedRule == nil ? "；没有匹配的启用规则" : ""))
         }
-        execute(rule)
+        guard let matchedRule else { return false }
+        execute(matchedRule)
         return true
     }
 

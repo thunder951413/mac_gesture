@@ -149,11 +149,15 @@ struct SettingsRootView: View {
                 .help("添加规则")
                 Button { if let selectedRuleID { delete(selectedRuleID) } } label: { Image(systemName: "trash") }
                     .disabled(selectedRuleID == nil)
+                    .help("删除所选规则")
             }
-            Button("还原") { model.reloadAndApply() }.disabled(!store.hasUnsavedChanges)
+            Button("还原") { model.reloadAndApply() }
+                .disabled(!store.hasUnsavedChanges)
+                .help("放弃未保存的修改，恢复到已保存的配置")
             Button("保存并应用") { model.saveAndApply() }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut("s", modifiers: .command)
+                .help("保存配置并让引擎立即生效 (⌘S)")
         }
     }
 
@@ -223,7 +227,7 @@ private struct RuleListRow: View {
             Spacer()
             Toggle("", isOn: $rule.isEnabled).labelsHidden().toggleStyle(.switch).controlSize(.small)
         }
-        .padding(.vertical, 3)
+        .padding(.vertical, 4)
     }
 
     private var summary: String {

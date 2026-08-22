@@ -7,20 +7,24 @@ struct RuleEditorView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                HStack {
+            VStack(alignment: .leading, spacing: 18) {
+                HStack(spacing: 12) {
                     TextField("规则名称", text: $rule.name).textFieldStyle(.plain).font(.title2.bold())
-                    Button { model.engine.testActions(for: rule) } label: {
+                    Button {
+                        model.engine.testActions(for: rule)
+                    } label: {
                         Label("测试动作", systemImage: "play.fill")
                     }
+                    .buttonStyle(.bordered)
+                    .help("按当前动作配置模拟执行一次")
                     Toggle("启用", isOn: $rule.isEnabled).toggleStyle(.switch)
                 }
                 Divider()
-                GroupBox("触发器") { triggerEditor.padding(.top, 6) }
-                GroupBox("适用范围") { scopeEditor.padding(.top, 6) }
-                GroupBox("执行动作") { actionsEditor.padding(.top, 6) }
+                GroupBox("触发器") { triggerEditor.padding(.top, 4) }
+                GroupBox("适用范围") { scopeEditor.padding(.top, 4) }
+                GroupBox("执行动作") { actionsEditor.padding(.top, 4) }
             }
-            .padding(26)
+            .padding(24)
             .frame(maxWidth: 720, alignment: .leading)
         }
         .navigationTitle(rule.name)
@@ -52,17 +56,21 @@ struct RuleEditorView: View {
 
             if rule.applicationScope.mode != .all {
                 ForEach(rule.applicationScope.bundleIdentifiers, id: \.self) { bundleID in
-                    HStack {
-                        Image(systemName: "app.dashed")
+                    HStack(spacing: 8) {
+                        Image(systemName: "app.dashed").foregroundStyle(.secondary)
                         Text(bundleID).textSelection(.enabled)
                         Spacer()
-                        Button { rule.applicationScope.bundleIdentifiers.removeAll { $0 == bundleID } } label: {
-                            Image(systemName: "minus.circle.fill")
-                        }.buttonStyle(.plain).foregroundStyle(.secondary)
+                        Button {
+                            rule.applicationScope.bundleIdentifiers.removeAll { $0 == bundleID }
+                        } label: {
+                            Image(systemName: "minus.circle.fill").frame(width: 22, height: 22)
+                        }
+                        .buttonStyle(.plain).foregroundStyle(.secondary)
+                        .help("移除此应用")
                     }
                 }
-                HStack {
-                    Button("选择应用…") { chooseApplication() }
+                HStack(spacing: 8) {
+                    Button("选择应用…") { chooseApplication() }.buttonStyle(.bordered)
                     Text("规则按 Bundle Identifier 匹配").font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -83,6 +91,7 @@ struct RuleEditorView: View {
             } label: {
                 Label("添加动作", systemImage: "plus.circle")
             }
+            .buttonStyle(.bordered)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -113,12 +122,14 @@ private struct TrackpadTriggerEditor: View {
             Picker("手势", selection: $trigger.direction) {
                 ForEach(GestureDirection.allCases) { Text($0.title).tag($0) }
             }
-            HStack {
-                Slider(value: $trigger.minimumDistance, in: 0.02...0.5, step: 0.01)
-                Text(trigger.minimumDistance.formatted(.number.precision(.fractionLength(2))))
-                    .monospacedDigit().frame(width: 38)
+            LabeledContent("触发距离") {
+                HStack {
+                    Slider(value: $trigger.minimumDistance, in: 0.02...0.5, step: 0.01)
+                        .frame(width: 190)
+                    Text(trigger.minimumDistance.formatted(.number.precision(.fractionLength(2))))
+                        .monospacedDigit().frame(width: 38)
+                }
             }
-            LabeledContent("触发距离") { EmptyView() }
         }
         .formStyle(.grouped)
     }
@@ -151,7 +162,11 @@ private struct ActionEditor: View {
                 }
                 .labelsHidden().frame(width: 190)
                 Spacer()
-                Button(action: onDelete) { Image(systemName: "trash") }.buttonStyle(.plain).foregroundStyle(.secondary)
+                Button(action: onDelete) {
+                    Image(systemName: "trash").frame(width: 26, height: 22)
+                }
+                .buttonStyle(.plain).foregroundStyle(.secondary)
+                .help("删除此动作")
             }
             editor
         }
@@ -190,12 +205,15 @@ struct ShortcutCaptureButton: View {
         Button {
             startRecording()
         } label: {
-            HStack(spacing: 5) {
+            HStack(spacing: 6) {
+                Image(systemName: recorder.isRecording ? "record.circle" : "keyboard")
                 if recorder.isRecording { Text("请按快捷键…").foregroundStyle(.secondary) }
                 else { Text(keys.isEmpty ? "点击录制" : keys.map(KeyNames.display).joined(separator: " ")).monospaced() }
             }
-            .frame(minWidth: 130)
+            .frame(minWidth: 150)
         }
+        .buttonStyle(.bordered)
+        .help("点击后直接按下想要录制的组合键")
         .onDisappear { stopRecording() }
     }
 
@@ -284,17 +302,23 @@ struct EngineSettingsView: View {
                 LabeledContent("最近触发", value: engine.lastEvent)
                 LabeledContent("最近触点", value: engine.lastTouchObservation)
                 LabeledContent("最近识别", value: engine.lastGestureObservation)
-                HStack {
+                HStack(spacing: 8) {
                     Button(engine.isRunning ? "重新启动引擎" : "启动引擎") { engine.start(configuration: model.store.configuration) }
-                    if engine.isRunning { Button("停止") { engine.stop() } }
+                        .buttonStyle(.borderedProminent)
+                    if engine.isRunning {
+                        Button("停止") { engine.stop() }
+                            .buttonStyle(.bordered)
+                    }
                 }
             }
             Section("系统权限") {
                 StatusRow(title: "辅助功能", available: engine.accessibilityGranted, detail: engine.accessibilityGranted ? "已授权" : "需要授权")
                 if !engine.accessibilityGranted {
-                    HStack {
+                    HStack(spacing: 8) {
                         Button("请求辅助功能权限…") { engine.requestAccessibilityPermission() }
+                            .buttonStyle(.borderedProminent)
                         Button("打开辅助功能设置") { engine.openAccessibilitySettings() }
+                            .buttonStyle(.bordered)
                     }
                 }
                 Text("监听全局快捷键和模拟按键需要辅助功能权限。授权后请重新启动引擎。")
@@ -312,8 +336,12 @@ struct EngineSettingsView: View {
             }
             Section("配置文件") {
                 Text(model.store.url.path).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([model.store.url]) }
-                Button("打开诊断日志") { NSWorkspace.shared.open(DiagnosticLog.url) }
+                HStack(spacing: 8) {
+                    Button("在 Finder 中显示") { NSWorkspace.shared.activateFileViewerSelecting([model.store.url]) }
+                        .buttonStyle(.bordered)
+                    Button("打开诊断日志") { NSWorkspace.shared.open(DiagnosticLog.url) }
+                        .buttonStyle(.bordered)
+                }
             }
             Section("触控板后端") {
                 Toggle("强制使用公开 API 兼容模式", isOn: Binding(
@@ -373,6 +401,7 @@ struct RecognitionSettingsView: View {
                     settings.spreadToDistanceRatio = defaults.spreadToDistanceRatio
                     settings.liveTriggerDistance = defaults.liveTriggerDistance
                 }
+                .buttonStyle(.bordered)
             }
         }
         .formStyle(.grouped).padding(10).navigationTitle("手势识别")

@@ -33,12 +33,15 @@ final class GestureRecognizer {
     private var maxGestureDistance: CGFloat = 0
     private var maxFingersSeen = 0
     private var gestureFingers = 0
+    private var gestureStartPositions: [Int: CGPoint] = [:]
+    private var maxCoherentTranslationDistance: CGFloat = 0
     private var startSpread: CGFloat = 0
     private var endSpread: CGFloat = 0
     private var didTriggerCurrentGesture = false
     private var lastObservedFingerCount = 0
     private var lastObservedFingerTimestamp: Double = 0
     private var observedFingerFrames = 0
+    private var gestureTouchIdentifiers = Set<Int>()
 
     var onGesture: ((GestureEvent) -> Bool)?
     var tuning = GestureTuning()
@@ -62,6 +65,7 @@ final class GestureRecognizer {
     }
 
     func processTouches(_ touches: [ActiveTouch], timestamp: Double) {
+        guard timestamp.isFinite, TouchFrameValidator.isValid(touches) else { return }
         let activeSet = Set(touches.map { $0.identifier })
         let prevCount = activeTouches.count
 
@@ -88,6 +92,9 @@ final class GestureRecognizer {
             return
         }
 
+        // 尚未确认的新手指不能进入中心点计算，否则一次轻触就会产生虚假位移。
+        guard nowCount <= effectiveCount else { return }
+
         if gestureFingers > 0 && nowCount < gestureFingers {
             if tuning.logLevel == "debug" {
                 fputs("[Gesture] 手指部分抬起，冻结中心点 | 当前=\(nowCount) 指 期望=\(gestureFingers) 指\n", stderr)
@@ -103,14 +110,34 @@ final class GestureRecognizer {
             resetMaxGestureDisplacement()
         }
 
-        if effectiveCount > gestureFingers && !didTriggerCurrentGesture {
+        if !didTriggerCurrentGesture && (effectiveCount > gestureFingers || activeSet != gestureTouchIdentifiers) {
             gestureFingers = effectiveCount
+            gestureTouchIdentifiers = activeSet
             gestureStartCentroid = currentCentroid
             startSpread = calculateSpread()
             resetMaxGestureDisplacement()
         }
 
         updateMaxGestureDisplacement()
+        // 捏合可能伴随中心点移动；先用每个触点相对中心的位移估计
+        // 形变，再比较剩余的共同平移。所有手指同向移动时形变接近零。
+        if let start = gestureStartCentroid, !activeTouches.isEmpty {
+            let dx = currentCentroid.x - start.x
+            let dy = currentCentroid.y - start.y
+            let squaredDeformation = activeTouches.values.reduce(CGFloat.zero) { total, touch in
+                guard let origin = gestureStartPositions[touch.identifier] else { return total }
+                let relativeX = touch.normalizedX - origin.x - dx
+                let relativeY = touch.normalizedY - origin.y - dy
+                return total + relativeX * relativeX + relativeY * relativeY
+            }
+            let deformation = sqrt(squaredDeformation / CGFloat(activeTouches.count))
+            let minimumTouchMotion = activeTouches.values.compactMap { touch -> CGFloat? in
+                guard let origin = gestureStartPositions[touch.identifier] else { return nil }
+                return hypot(touch.normalizedX - origin.x, touch.normalizedY - origin.y)
+            }.min() ?? hypot(dx, dy)
+            let coherentMotion = min(minimumTouchMotion, max(0, hypot(dx, dy) - deformation))
+            maxCoherentTranslationDistance = max(maxCoherentTranslationDistance, coherentMotion)
+        }
         endSpread = calculateSpread()
 
         if !didTriggerCurrentGesture,
@@ -141,7 +168,7 @@ final class GestureRecognizer {
         let spreadSignificant = abs(spreadDelta) > tuning.spreadThreshold
 
         var direction: GestureDirection
-        if fingers >= 4 && spreadSignificant && abs(spreadDelta) > totalDistance * tuning.spreadToDistanceRatio {
+        if fingers >= 4 && spreadSignificant && abs(spreadDelta) > min(totalDistance, maxCoherentTranslationDistance) * tuning.spreadToDistanceRatio {
             direction = spreadDelta > 0 ? .spread : .pinch
         } else if totalDistance > tuning.minSwipeDistance {
             let absDx = abs(dx)
@@ -188,9 +215,11 @@ final class GestureRecognizer {
         return GestureEvent(fingers: fingers, direction: direction, distance: recognizedDistance, dx: dx, dy: dy)
     }
 
-    private func reset() {
+    func reset() {
         activeTouches.removeAll()
         gestureStartCentroid = nil
+        gestureStartPositions.removeAll()
+        maxCoherentTranslationDistance = 0
         currentCentroid = .zero
         resetMaxGestureDisplacement()
         startSpread = 0
@@ -201,6 +230,7 @@ final class GestureRecognizer {
         lastObservedFingerCount = 0
         lastObservedFingerTimestamp = 0
         observedFingerFrames = 0
+        gestureTouchIdentifiers.removeAll()
     }
 
     private func updateObservedFingerCount(_ count: Int, timestamp: Double) {
@@ -255,6 +285,8 @@ final class GestureRecognizer {
     }
 
     private func resetMaxGestureDisplacement() {
+        gestureStartPositions = activeTouches.mapValues { CGPoint(x: $0.normalizedX, y: $0.normalizedY) }
+        maxCoherentTranslationDistance = 0
         maxGestureDx = 0
         maxGestureDy = 0
         maxGestureDistance = 0

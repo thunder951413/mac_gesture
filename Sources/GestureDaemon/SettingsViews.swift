@@ -19,7 +19,7 @@ private enum SidebarSelection: Hashable {
 
 struct SettingsRootView: View {
     @EnvironmentObject private var model: AppModel
-    @ObservedObject private var viewState = SettingsViewState()
+    @StateObject private var viewState = SettingsViewState()
 
     private var section: SidebarSelection {
         get { viewState.section }
@@ -36,7 +36,9 @@ struct SettingsRootView: View {
     private var store: ConfigurationStore { model.store }
 
     var body: some View {
-        Group {
+        VStack(spacing: 0) {
+            commandBar
+            Divider()
             if isRulesSection {
                 NavigationSplitView {
                     sidebar
@@ -53,14 +55,16 @@ struct SettingsRootView: View {
                 }
             }
         }
-        .toolbar { toolbar }
         .onAppear {
             if selectedRuleID == nil {
                 DispatchQueue.main.async { selectedRuleID = filteredRules.first?.id }
             }
         }
         .onChange(of: viewState.section) { _ in
-            selectedRuleID = filteredRules.first?.id
+            repairSelection()
+        }
+        .onChange(of: store.configuration.rules.map(\.id)) { _ in
+            repairSelection()
         }
         .alert("配置错误", isPresented: Binding(get: { store.lastError != nil }, set: { if !$0 { store.clearError() } })) {
             Button("好") {}
@@ -139,16 +143,27 @@ struct SettingsRootView: View {
         }
     }
 
-    @ToolbarContentBuilder private var toolbar: some ToolbarContent {
-        ToolbarItemGroup {
+    private var commandBar: some View {
+        HStack(spacing: 10) {
+            Text(section.title).font(.headline)
+            Spacer()
             if isRulesSection {
                 Menu {
                     Button("触控板规则") { addRule(.trackpad) }
                     Button("键盘规则") { addRule(.keyboard) }
                 } label: { Image(systemName: "plus") }
+                .fixedSize()
+                .accessibilityLabel("添加规则")
                 .help("添加规则")
+                Button { moveSelectedRule(by: -1) } label: { Image(systemName: "arrow.up") }
+                    .disabled(!canMoveSelectedRule(by: -1))
+                    .accessibilityLabel("提高规则优先级").help("提高规则优先级")
+                Button { moveSelectedRule(by: 1) } label: { Image(systemName: "arrow.down") }
+                    .disabled(!canMoveSelectedRule(by: 1))
+                    .accessibilityLabel("降低规则优先级").help("降低规则优先级")
                 Button { if let selectedRuleID { delete(selectedRuleID) } } label: { Image(systemName: "trash") }
                     .disabled(selectedRuleID == nil)
+                    .accessibilityLabel("删除所选规则")
                     .help("删除所选规则")
             }
             Button("还原") { model.reloadAndApply() }
@@ -156,9 +171,11 @@ struct SettingsRootView: View {
                 .help("放弃未保存的修改，恢复到已保存的配置")
             Button("保存并应用") { model.saveAndApply() }
                 .buttonStyle(.borderedProminent)
-                .keyboardShortcut("s", modifiers: .command)
                 .help("保存配置并让引擎立即生效 (⌘S)")
         }
+        .buttonStyle(.bordered)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     private func binding(for id: UUID) -> Binding<AutomationRule> {
@@ -179,8 +196,8 @@ struct SettingsRootView: View {
             rule = AutomationRule(name: "新键盘规则", trigger: .keyboard(KeyboardTrigger()), actions: [.keyboard(["down"])])
         }
         store.configuration.rules.append(rule)
-        selectedRuleID = rule.id
         section = .category(category)
+        selectedRuleID = rule.id
     }
 
     private func delete(_ id: UUID) {
@@ -188,10 +205,32 @@ struct SettingsRootView: View {
         selectedRuleID = filteredRules.first?.id
     }
 
+    private func repairSelection() {
+        if !filteredRules.contains(where: { $0.id == selectedRuleID }) { selectedRuleID = filteredRules.first?.id }
+    }
+
     private func duplicate(_ id: UUID) {
         guard var copy = store.configuration.rules.first(where: { $0.id == id }) else { return }
         copy.id = UUID(); copy.name += " 副本"
+        copy.actions = copy.actions.map { action in
+            var action = action
+            action.id = UUID()
+            return action
+        }
         store.configuration.rules.append(copy); selectedRuleID = copy.id
+    }
+
+    private func canMoveSelectedRule(by offset: Int) -> Bool {
+        guard let index = filteredRules.firstIndex(where: { $0.id == selectedRuleID }) else { return false }
+        return filteredRules.indices.contains(index + offset)
+    }
+
+    private func moveSelectedRule(by offset: Int) {
+        guard canMoveSelectedRule(by: offset),
+              let index = filteredRules.firstIndex(where: { $0.id == selectedRuleID }),
+              let source = store.configuration.rules.firstIndex(where: { $0.id == filteredRules[index].id }),
+              let destination = store.configuration.rules.firstIndex(where: { $0.id == filteredRules[index + offset].id }) else { return }
+        store.configuration.rules.swapAt(source, destination)
     }
 }
 

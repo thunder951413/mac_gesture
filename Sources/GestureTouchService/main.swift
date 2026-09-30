@@ -1,14 +1,22 @@
 import Foundation
 import GestureTouchCore
 
+// MultitouchSupport 会把设备诊断写到 stdout。先保留协议管道，再将
+// 普通 stdout 重定向到 stderr，保证框架输出不能污染 JSON Lines。
+let protocolDescriptor = dup(STDOUT_FILENO)
+guard protocolDescriptor >= 0 else { exit(2) }
+let protocolOutput = FileHandle(fileDescriptor: protocolDescriptor, closeOnDealloc: true)
+guard dup2(STDERR_FILENO, STDOUT_FILENO) >= 0 else { exit(2) }
+
 let outputQueue = DispatchQueue(label: "com.gesture.touch-service.output")
 let originalParentPID = getppid()
 
 func send(_ message: TouchServiceMessage) {
     outputQueue.sync {
-        guard let data = try? JSONEncoder().encode(message) else { return }
-        FileHandle.standardOutput.write(data)
-        FileHandle.standardOutput.write(Data([0x0A]))
+        guard var data = try? JSONEncoder().encode(message) else { return }
+        data.append(0x0A)
+        do { try protocolOutput.write(contentsOf: data) }
+        catch { exit(0) }
     }
 }
 

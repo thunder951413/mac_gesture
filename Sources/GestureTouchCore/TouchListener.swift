@@ -1,21 +1,6 @@
 import Foundation
 import CoreGraphics
 
-/// MTFinger 私有结构体的字段偏移量（macOS 14+/26 实测）。
-/// 这些是私有 API，布局未公开，集中在此便于跨版本维护与校验。
-private enum MTFingerLayout {
-    /// 单个 MTFinger 结构体大小（字节）
-    static let structSize: Int = 64
-    // 字段偏移量
-    static let offsetIdentifier: Int = 16
-    static let offsetState: Int = 20
-    static let offsetX: Int = 32
-    static let offsetY: Int = 36
-    // 坐标合理性范围（归一化值，触控板外少许裕量）
-    static let coordMin: CGFloat = -0.2
-    static let coordMax: CGFloat = 1.2
-}
-
 public final class TouchListener {
     public typealias TouchCallback = ([ActiveTouch], Double) -> Void
 
@@ -24,12 +9,13 @@ public final class TouchListener {
     private var devicePointers: [UnsafeMutableRawPointer] = []
     private var usesRefconCallback = false
     private var invalidFrameCount = 0
-    private var lastTimestamp: Double = 0
+    private var lastTimestamps: [UInt: Double] = [:]
+    private var activeDevice: UInt?
     private let frameworkHandle: UnsafeMutableRawPointer
 
     fileprivate static let maxFingers = 20
     // MT 回调在框架内部线程触发，多设备时并发；所有静态与实例帧状态都经此锁串行化。
-    private static let stateLock = NSLock()
+    private static let listenerState = ListenerState()
 
     // MARK: - Correct callback signatures (macOS 14+ / 26)
 
@@ -55,78 +41,68 @@ public final class TouchListener {
     public init(callback: @escaping TouchCallback) throws {
         self.onTouch = callback
         self.frameworkHandle = try TouchListener.loadFramework()
-        try findAndStartDevice()
+        do { try findAndStartDevice() }
+        catch { stopDevice(); throw error }
     }
 
     deinit { stopDevice() }
 
     // MARK: - Callbacks
 
-    private static let callback: MTContactCallback = { _, data, n, ts, _ in
-        processTouches(data: data, nFingers: n, ts: ts, refcon: nil)
+    private static let callback: MTContactCallback = { device, data, n, ts, _ in
+        processTouches(device: device, data: data, nFingers: n, ts: ts)
         return 0
     }
 
-    private static let callbackWithRefcon: MTContactCallbackWithRefcon = { _, data, n, ts, _, refcon in
-        processTouches(data: data, nFingers: n, ts: ts, refcon: refcon)
+    private static let callbackWithRefcon: MTContactCallbackWithRefcon = { device, data, n, ts, _, _ in
+        processTouches(device: device, data: data, nFingers: n, ts: ts)
         return 0
     }
 
-    private static func processTouches(data: UnsafeMutableRawPointer?,
-                                        nFingers: Int32, ts: Double,
-                                        refcon: UnsafeMutableRawPointer?) {
-        stateLock.lock()
-        defer { stateLock.unlock() }
+    private static func processTouches(device: UnsafeMutableRawPointer?, data: UnsafeMutableRawPointer?,
+                                        nFingers: Int32, ts: Double) {
+        listenerState.lock.lock()
+        defer { listenerState.lock.unlock() }
 
-        let listener: TouchListener?
-        if let r = refcon {
-            listener = Unmanaged<TouchListener>.fromOpaque(r).takeUnretainedValue()
-        } else {
-            listener = activeListener
-        }
-        guard let l = listener else { return }
-        guard let data = data, nFingers > 0 else { l.onTouch([], ts); return }
+        // 使用受锁保护的弱引用，避免注销后迟到的 refcon 回调访问释放的实例。
+        guard let l = listenerState.listener, let device else { return }
+        let deviceID = UInt(bitPattern: device)
 
-        guard ts.isFinite, ts >= l.lastTimestamp else {
+        guard ts.isFinite, ts >= 0, ts >= (l.lastTimestamps[deviceID] ?? 0) else {
             l.registerInvalidFrame("时间戳异常: \(ts)")
             return
         }
-        l.lastTimestamp = ts
-
-        guard nFingers <= maxFingers else {
+        guard nFingers >= 0, nFingers <= maxFingers, nFingers == 0 || data != nil else {
             l.registerInvalidFrame("异常手指数量: \(nFingers)")
-            l.onTouch([], ts)
             return
         }
 
-        var touches = [ActiveTouch]()
-        touches.reserveCapacity(Int(nFingers))
-        let p = data.assumingMemoryBound(to: UInt8.self)
-        let sz = MTFingerLayout.structSize
-        var identifiers = Set<Int>()
-        for i in 0..<Int(nFingers) {
-            let b = p.advanced(by: i * sz)
-            let ident = Int(readInt32(b, offset: MTFingerLayout.offsetIdentifier))
-            let state = Int(readInt32(b, offset: MTFingerLayout.offsetState))
-            let x = CGFloat(readFloat(b, offset: MTFingerLayout.offsetX))
-            let y = CGFloat(readFloat(b, offset: MTFingerLayout.offsetY))
-
-            guard (-1...128).contains(ident), identifiers.insert(ident).inserted else {
-                l.registerInvalidFrame("触点标识异常或重复: \(ident)")
-                return
+        if nFingers == 0 {
+            l.lastTimestamps[deviceID] = ts
+            l.invalidFrameCount = 0
+            if l.activeDevice == deviceID {
+                l.onTouch([], ProcessInfo.processInfo.systemUptime)
+                l.activeDevice = nil
             }
+            return
+        }
+        guard let data else { return }
 
-            // 全量坐标合理性校验：私有结构体布局若跨版本变化会读到越界值，
-            // 此时丢弃整帧，避免空触点被误判为真实抬手并提前触发手势。
-            if !MTFingerLayout.isCoordValid(x, y) {
-                l.registerInvalidFrame("坐标异常 (i=\(i) x:\(x) y:\(y))，结构体布局可能已变化")
-                return
-            }
-            touches.append(ActiveTouch(identifier: ident, state: state,
-                                        normalizedX: x, normalizedY: y))
+        let touches: [ActiveTouch]
+        do {
+            touches = try MTContactDecoder.decode(
+                UnsafeRawBufferPointer(start: data, count: Int(nFingers) * MTContactDecoder.stride),
+                count: Int(nFingers)
+            )
+        } catch {
+            l.registerInvalidFrame(error.localizedDescription)
+            return
         }
         l.invalidFrameCount = 0
-        l.onTouch(touches, ts)
+        l.lastTimestamps[deviceID] = ts
+        // 一次手势只属于一个设备，第二块触控板的空帧不会结束当前手势。
+        if l.activeDevice == nil { l.activeDevice = deviceID }
+        if l.activeDevice == deviceID { l.onTouch(touches, ProcessInfo.processInfo.systemUptime) }
     }
 
     private func registerInvalidFrame(_ reason: String) {
@@ -138,17 +114,11 @@ public final class TouchListener {
         }
     }
 
-    // MARK: - Struct field readers
-
-    private static func readInt32(_ base: UnsafePointer<UInt8>, offset: Int) -> Int32 {
-        base.advanced(by: offset).withMemoryRebound(to: Int32.self, capacity: 1) { $0.pointee }
+    // listener 的所有读写均持有 lock；盒子本身以不可变 static let 发布。
+    private final class ListenerState: @unchecked Sendable {
+        let lock = NSLock()
+        weak var listener: TouchListener?
     }
-
-    private static func readFloat(_ base: UnsafePointer<UInt8>, offset: Int) -> Float {
-        base.advanced(by: offset).withMemoryRebound(to: Float.self, capacity: 1) { $0.pointee }
-    }
-
-    fileprivate static weak var activeListener: TouchListener?
 
     // MARK: - Framework
 
@@ -200,9 +170,9 @@ public final class TouchListener {
         guard regular != nil || withRefcon != nil else { throw TouchError("找不到触点回调注册函数") }
 
         deviceArray = arr
-        TouchListener.stateLock.lock()
-        TouchListener.activeListener = self
-        TouchListener.stateLock.unlock()
+        TouchListener.listenerState.lock.lock()
+        TouchListener.listenerState.listener = self
+        TouchListener.listenerState.lock.unlock()
         usesRefconCallback = regular == nil
         let refcon = Unmanaged.passUnretained(self).toOpaque()
         for index in 0..<count {
@@ -219,6 +189,9 @@ public final class TouchListener {
     }
 
     private func stopDevice() {
+        TouchListener.listenerState.lock.lock()
+        if TouchListener.listenerState.listener === self { TouchListener.listenerState.listener = nil }
+        TouchListener.listenerState.lock.unlock()
         guard !devicePointers.isEmpty else { return }
         typealias U5 = @convention(c) (UnsafeMutableRawPointer, MTContactCallback?) -> Void
         typealias U6 = @convention(c) (UnsafeMutableRawPointer, MTContactCallbackWithRefcon?) -> Void
@@ -235,18 +208,7 @@ public final class TouchListener {
         }
         deviceArray = nil
         devicePointers.removeAll()
-        TouchListener.stateLock.lock()
-        TouchListener.activeListener = nil
-        TouchListener.stateLock.unlock()
         fputs("[TouchListener] 资源已回收\n", stderr)
-    }
-}
-
-private extension MTFingerLayout {
-    /// 坐标是否在合理范围内。归一化坐标通常在 [0,1]，
-    /// 触控板边缘允许少许越界，但远超此范围说明结构体偏移可能错误。
-    static func isCoordValid(_ x: CGFloat, _ y: CGFloat) -> Bool {
-        x >= coordMin && x <= coordMax && y >= coordMin && y <= coordMax
     }
 }
 
@@ -256,7 +218,7 @@ public struct TouchError: LocalizedError {
     public var errorDescription: String? { message }
 }
 
-public struct ActiveTouch: Codable {
+public struct ActiveTouch: Codable, Sendable {
     public let identifier: Int
     public let state: Int
     public let normalizedX: CGFloat

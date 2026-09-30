@@ -1,4 +1,4 @@
-.PHONY: build release run run-release clean bundle run-app install install-app test
+.PHONY: build release run run-release clean bundle run-app install install-app test verify
 
 BUILD_DIR := .build
 EXECUTABLE := $(BUILD_DIR)/debug/GestureDaemon
@@ -26,6 +26,11 @@ run-release: release
 test:
 	$(SWIFT) test
 
+verify: test
+	$(MAKE) bundle
+	codesign --verify --deep --strict $(APP_BUNDLE)
+	plutil -lint $(APP_BUNDLE)/Contents/Info.plist
+
 bundle: release
 	rm -rf $(APP_BUNDLE)
 	mkdir -p $(APP_BUNDLE)/Contents/MacOS $(APP_BUNDLE)/Contents/Helpers $(APP_BUNDLE)/Contents/Resources
@@ -34,7 +39,7 @@ bundle: release
 	cp Resources/Info.plist $(APP_BUNDLE)/Contents/Info.plist
 	chmod +x $(APP_BUNDLE)/Contents/MacOS/GestureDaemon $(APP_BUNDLE)/Contents/Helpers/GestureTouchService
 	codesign --force --options runtime --timestamp=none --sign "$(CODESIGN_SIGN)" $(APP_BUNDLE)/Contents/Helpers/GestureTouchService
-	codesign --force --deep --options runtime --timestamp=none --sign "$(CODESIGN_SIGN)" $(APP_BUNDLE)
+	codesign --force --options runtime --timestamp=none --sign "$(CODESIGN_SIGN)" $(APP_BUNDLE)
 
 run-app: bundle
 	open $(APP_BUNDLE)
@@ -48,5 +53,5 @@ install-app: bundle
 	@echo "首次运行后请在系统设置中授予辅助功能权限"
 
 clean:
-	swift package clean
+	$(SWIFT) package clean
 	rm -rf $(BUILD_DIR) dist

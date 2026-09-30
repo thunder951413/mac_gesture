@@ -9,6 +9,7 @@ enum TrackpadProviderState {
     case failed(String)
 }
 
+@MainActor
 final class TouchServiceProvider {
     typealias FrameHandler = ([ActiveTouch], Double) -> Void
 
@@ -18,95 +19,112 @@ final class TouchServiceProvider {
     private var process: Process?
     private var outputPipe: Pipe?
     private var errorPipe: Pipe?
-    private var buffer = Data()
-    private var recentErrorOutput = ""
-    private let errorLock = NSLock()
-    private let decodeQueue = DispatchQueue(label: "com.gesture.touch-service.decode")
-    private var stopping = false
+    private var sessionID = UUID()
+    private var didFail = false
+    private var startupWatchdog: ServiceWatchdog?
+    private let executableOverride: URL?
+    private let startupTimeout: TimeInterval
+
+    init(executableURL: URL? = nil, startupTimeout: TimeInterval = 5) {
+        executableOverride = executableURL
+        self.startupTimeout = startupTimeout
+    }
 
     func start() throws {
         stop()
-        errorLock.lock(); recentErrorOutput = ""; errorLock.unlock()
-        guard let executableURL = Self.executableURL else {
+        guard let executableURL = executableOverride ?? Self.executableURL else {
             throw ProviderError("找不到 GestureTouchService")
         }
-        stopping = false
+        let session = sessionID
+        didFail = false
         let process = Process()
         let pipe = Pipe()
         let errors = Pipe()
+        let decoder = TouchServiceStreamDecoder()
+        let errorOutput = ServiceErrorOutput()
+        let decodeQueue = DispatchQueue(label: "com.gesture.touch-service.decode")
         process.executableURL = executableURL
         process.standardOutput = pipe
         process.standardError = errors
         pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             guard !data.isEmpty else { return }
-            self?.decodeQueue.async { self?.consume(data) }
+            decodeQueue.async { [weak self] in
+                do {
+                    let messages = try decoder.consume(data)
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.sessionID == session, !self.didFail else { return }
+                        for message in messages {
+                            guard self.sessionID == session else { return }
+                            self.receive(message)
+                        }
+                    }
+                } catch {
+                    let reason = error.localizedDescription
+                    DispatchQueue.main.async { [weak self] in
+                        guard let self, self.sessionID == session else { return }
+                        self.fail(reason)
+                    }
+                }
+            }
         }
-        errors.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty, let text = String(data: data, encoding: .utf8) else { return }
-            self?.appendErrorOutput(text)
+        errors.fileHandleForReading.readabilityHandler = { handle in
+            errorOutput.append(handle.availableData)
         }
         process.terminationHandler = { [weak self] process in
-            guard let self, !self.stopping else { return }
-            let detail = self.errorOutputTail()
+            let detail = errorOutput.tail
             let reason = "高级触控板服务已退出（状态码 \(process.terminationStatus)）" + (detail.isEmpty ? "" : "：\(detail)")
-            DispatchQueue.main.async { self.onStateChange?(.failed(reason)) }
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.sessionID == session else { return }
+                self.fail(reason)
+            }
         }
         self.process = process
         outputPipe = pipe
         errorPipe = errors
         onStateChange?(.starting)
-        try process.run()
+        do { try process.run() }
+        catch { stop(); throw error }
+        let watchdog = DispatchWorkItem { [weak self] in
+            guard let self, self.sessionID == session else { return }
+            self.fail("高级触控板服务启动超时")
+        }
+        startupWatchdog = ServiceWatchdog(item: watchdog)
+        DispatchQueue.main.asyncAfter(deadline: .now() + startupTimeout, execute: watchdog)
     }
 
     func stop() {
-        stopping = true
+        sessionID = UUID()
+        startupWatchdog?.cancel()
+        startupWatchdog = nil
         outputPipe?.fileHandleForReading.readabilityHandler = nil
         errorPipe?.fileHandleForReading.readabilityHandler = nil
-        if let process, process.isRunning {
-            process.terminate()
-            process.waitUntilExit()
-        }
+        if let process { ManagedProcess.terminate(process) }
         process = nil
         outputPipe = nil
         errorPipe = nil
-        decodeQueue.sync { buffer.removeAll(keepingCapacity: false) }
     }
 
-    private func appendErrorOutput(_ text: String) {
-        errorLock.lock()
-        recentErrorOutput += text
-        if recentErrorOutput.count > 4_000 { recentErrorOutput = String(recentErrorOutput.suffix(4_000)) }
-        errorLock.unlock()
-    }
-
-    private func errorOutputTail() -> String {
-        errorLock.lock(); defer { errorLock.unlock() }
-        return recentErrorOutput.split(separator: "\n").last.map(String.init) ?? ""
-    }
-
-    private func consume(_ data: Data) {
-        buffer.append(data)
-        while let newline = buffer.firstIndex(of: 0x0A) {
-            let line = buffer[..<newline]
-            buffer.removeSubrange(...newline)
-            guard !line.isEmpty,
-                  let message = try? JSONDecoder().decode(TouchServiceMessage.self, from: Data(line)) else { continue }
-            DispatchQueue.main.async { [weak self] in
-                guard let self else { return }
-                switch message.kind {
-                case .ready:
-                    self.onStateChange?(.advanced)
-                case .frame:
-                    if let touches = message.touches, let timestamp = message.timestamp {
-                        self.onFrame?(touches, timestamp)
-                    }
-                case .error:
-                    self.onStateChange?(.failed(message.message ?? "高级触控板服务发生未知错误"))
-                }
-            }
+    private func receive(_ message: TouchServiceMessage) {
+        guard !didFail else { return }
+        switch message.kind {
+        case .ready:
+            startupWatchdog?.cancel()
+            startupWatchdog = nil
+            onStateChange?(.advanced)
+        case .frame:
+            if let touches = message.touches, let timestamp = message.timestamp { onFrame?(touches, timestamp) }
+        case .error:
+            fail(message.message ?? "高级触控板服务发生未知错误")
         }
+    }
+
+    private func fail(_ reason: String) {
+        guard !didFail else { return }
+        didFail = true
+        startupWatchdog?.cancel()
+        if let process { ManagedProcess.terminate(process) }
+        onStateChange?(.failed(reason))
     }
 
     private static var executableURL: URL? {
@@ -124,69 +142,76 @@ final class TouchServiceProvider {
         return fileManager.isExecutableFile(atPath: debug.path) ? debug : nil
     }
 
-    deinit { stop() }
+    deinit {
+        startupWatchdog?.cancel()
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        errorPipe?.fileHandleForReading.readabilityHandler = nil
+        if let process { ManagedProcess.terminate(process) }
+    }
+}
+
+// DispatchWorkItem.cancel() 本身线程安全，释放 provider 时也可以取消计时任务。
+private struct ServiceWatchdog: @unchecked Sendable {
+    let item: DispatchWorkItem
+    func cancel() { item.cancel() }
+}
+
+private final class ServiceErrorOutput: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock(); defer { lock.unlock() }
+        data.append(chunk)
+        if data.count > 4_000 { data = Data(data.suffix(4_000)) }
+    }
+
+    var tail: String {
+        lock.lock(); defer { lock.unlock() }
+        return String(decoding: data, as: UTF8.self).split(separator: "\n").last.map(String.init) ?? ""
+    }
 }
 
 final class PublicGestureProvider {
     var onGesture: ((GestureEvent) -> Void)?
     private var monitor: Any?
-    private var scrollDX: CGFloat = 0
-    private var scrollDY: CGFloat = 0
-    private var magnification: CGFloat = 0
+    private var localMonitor: Any?
+    private var accumulator = PublicGestureAccumulator()
 
     @discardableResult
     func start() -> Bool {
         stop()
         let mask: NSEvent.EventTypeMask = [.scrollWheel, .swipe, .magnify]
-        monitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
-            DispatchQueue.main.async { self?.handle(event) }
+        monitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in self?.handle(event) }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+            self?.handle(event)
+            return event
         }
-        return monitor != nil
+        return monitor != nil && localMonitor != nil
     }
 
     func stop() {
         if let monitor { NSEvent.removeMonitor(monitor) }
+        if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         monitor = nil
-        reset()
+        localMonitor = nil
+        accumulator = PublicGestureAccumulator()
     }
 
     private func handle(_ event: NSEvent) {
+        let gesture: GestureEvent?
         switch event.type {
         case .scrollWheel:
             guard event.hasPreciseScrollingDeltas else { return }
-            if event.phase == .began { scrollDX = 0; scrollDY = 0 }
-            scrollDX += event.scrollingDeltaX / 500
-            scrollDY += event.scrollingDeltaY / 500
-            if event.phase == .ended || event.phase == .cancelled {
-                emitSwipe(dx: scrollDX, dy: scrollDY)
-                scrollDX = 0; scrollDY = 0
-            }
+            gesture = accumulator.scroll(dx: event.scrollingDeltaX / 500, dy: event.scrollingDeltaY / 500,
+                                         phase: event.phase, momentum: event.momentumPhase)
         case .swipe:
-            emitSwipe(dx: event.deltaX / 10, dy: event.deltaY / 10)
+            gesture = PublicGestureAccumulator.swipe(dx: event.deltaX / 10, dy: event.deltaY / 10)
         case .magnify:
-            if event.phase == .began { magnification = 0 }
-            magnification += event.magnification
-            if event.phase == .ended || event.phase == .cancelled {
-                let direction: GestureDirection = magnification >= 0 ? .spread : .pinch
-                onGesture?(GestureEvent(fingers: 2, direction: direction, distance: abs(magnification), dx: 0, dy: 0))
-                magnification = 0
-            }
-        default:
-            break
+            gesture = accumulator.magnify(event.magnification, phase: event.phase)
+        default: return
         }
-    }
-
-    private func emitSwipe(dx: CGFloat, dy: CGFloat) {
-        let distance = hypot(dx, dy)
-        guard distance >= 0.01 else { return }
-        let direction: GestureDirection
-        if abs(dx) > abs(dy) { direction = dx > 0 ? .right : .left }
-        else { direction = dy > 0 ? .up : .down }
-        onGesture?(GestureEvent(fingers: 2, direction: direction, distance: distance, dx: dx, dy: dy))
-    }
-
-    private func reset() {
-        scrollDX = 0; scrollDY = 0; magnification = 0
+        if let gesture { onGesture?(gesture) }
     }
 
     deinit { stop() }

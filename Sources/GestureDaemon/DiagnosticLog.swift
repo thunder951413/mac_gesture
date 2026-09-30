@@ -1,6 +1,7 @@
 import Foundation
 
-final class DiagnosticLog {
+// 写入状态仅在串行 queue 上访问，初始化发生在 shared 发布之前。
+final class DiagnosticLog: @unchecked Sendable {
     static let shared = DiagnosticLog()
     static let url = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent("Library/Logs/Gesture/gesture.log")

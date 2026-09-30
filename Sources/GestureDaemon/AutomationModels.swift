@@ -159,13 +159,13 @@ struct EngineSettings: Codable, Equatable {
         self.useCompatibilityTrackpadMode = useCompatibilityTrackpadMode
         self.debounceMilliseconds = max(0, debounceMilliseconds)
         self.logLevel = logLevel
-        self.diagonalRejectRatio = min(1, max(0, diagonalRejectRatio))
-        self.downBiasRatio = min(1, max(0, downBiasRatio))
-        self.spreadThreshold = max(0, spreadThreshold)
-        self.minimumSwipeDistance = max(0, minimumSwipeDistance)
-        self.downBiasMinimumY = max(0, downBiasMinimumY)
-        self.spreadToDistanceRatio = max(0, spreadToDistanceRatio)
-        self.liveTriggerDistance = max(0, liveTriggerDistance)
+        self.diagonalRejectRatio = diagonalRejectRatio.isFinite ? min(1, max(0, diagonalRejectRatio)) : 0.95
+        self.downBiasRatio = downBiasRatio.isFinite ? min(1, max(0, downBiasRatio)) : 0.35
+        self.spreadThreshold = spreadThreshold.isFinite ? max(0, spreadThreshold) : 0.03
+        self.minimumSwipeDistance = minimumSwipeDistance.isFinite ? max(0, minimumSwipeDistance) : 0.01
+        self.downBiasMinimumY = downBiasMinimumY.isFinite ? max(0, downBiasMinimumY) : 0.08
+        self.spreadToDistanceRatio = spreadToDistanceRatio.isFinite ? max(0, spreadToDistanceRatio) : 2
+        self.liveTriggerDistance = liveTriggerDistance.isFinite ? max(0, liveTriggerDistance) : 0.06
     }
 
     private enum CodingKeys: String, CodingKey {
@@ -191,12 +191,48 @@ struct EngineSettings: Codable, Equatable {
             liveTriggerDistance: try values.decodeIfPresent(Double.self, forKey: .liveTriggerDistance) ?? 0.06
         )
     }
+
+    var normalized: EngineSettings {
+        EngineSettings(
+            launchAtLogin: launchAtLogin, hideDockIcon: hideDockIcon, hideMenuBarIcon: hideMenuBarIcon,
+            useCompatibilityTrackpadMode: useCompatibilityTrackpadMode,
+            debounceMilliseconds: debounceMilliseconds, logLevel: logLevel,
+            diagonalRejectRatio: diagonalRejectRatio, downBiasRatio: downBiasRatio,
+            spreadThreshold: spreadThreshold, minimumSwipeDistance: minimumSwipeDistance,
+            downBiasMinimumY: downBiasMinimumY, spreadToDistanceRatio: spreadToDistanceRatio,
+            liveTriggerDistance: liveTriggerDistance
+        )
+    }
 }
 
 struct AutomationConfiguration: Codable, Equatable {
     var schemaVersion = 2
     var rules: [AutomationRule]
     var settings: EngineSettings
+
+    init(schemaVersion: Int = 2, rules: [AutomationRule], settings: EngineSettings) {
+        self.schemaVersion = schemaVersion
+        self.rules = rules
+        self.settings = settings
+    }
+
+    private enum CodingKeys: String, CodingKey { case schemaVersion, rules, settings }
+
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 2
+        guard schemaVersion == 2 else { throw ConfigurationError.unsupportedSchema(schemaVersion) }
+        rules = try values.decode([AutomationRule].self, forKey: .rules)
+        settings = try values.decodeIfPresent(EngineSettings.self, forKey: .settings) ?? EngineSettings()
+    }
+
+    func validateIdentity() throws {
+        guard schemaVersion == 2 else { throw ConfigurationError.unsupportedSchema(schemaVersion) }
+        guard Set(rules.map(\.id)).count == rules.count,
+              rules.allSatisfy({ Set($0.actions.map(\.id)).count == $0.actions.count }) else {
+            throw ConfigurationError.duplicateIdentity
+        }
+    }
 
     static let defaults = AutomationConfiguration(
         rules: [

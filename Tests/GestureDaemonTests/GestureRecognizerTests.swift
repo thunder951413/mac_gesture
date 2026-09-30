@@ -149,3 +149,190 @@ final class GestureRecognizerTests: XCTestCase {
         XCTAssertEqual(event?.fingers, 4)
     }
 }
+
+extension GestureRecognizerTests {
+    private func pair(x: CGFloat, y: CGFloat = 0.5) -> [ActiveTouch] {
+        [ActiveTouch(identifier: 1, state: 4, normalizedX: x, normalizedY: y),
+         ActiveTouch(identifier: 2, state: 4, normalizedX: x + 0.01, normalizedY: y)]
+    }
+
+    func testTransientExtraFingerCannotCreateFalseSwipe() {
+        let recognizer = GestureRecognizer()
+        var count = 0
+        recognizer.onGesture = { _ in count += 1; return true }
+        recognizer.processTouches(pair(x: 0.2), timestamp: 0)
+        let extra = ActiveTouch(identifier: 3, state: 4, normalizedX: 1, normalizedY: 0.5)
+        recognizer.processTouches(pair(x: 0.2) + [extra], timestamp: 0.005)
+        recognizer.processTouches(pair(x: 0.2), timestamp: 0.01)
+        recognizer.processTouches([], timestamp: 0.02)
+        XCTAssertEqual(count, 0)
+    }
+
+    func testAcceptedLiveGestureOnlyFiresOnceAndNextGestureStillWorks() {
+        let recognizer = GestureRecognizer()
+        var count = 0
+        recognizer.onGesture = { _ in count += 1; return true }
+        for offset in [0.0, 1.0] {
+            recognizer.processTouches(pair(x: 0.2), timestamp: offset)
+            recognizer.processTouches(pair(x: 0.4), timestamp: offset + 0.01)
+            recognizer.processTouches(pair(x: 0.6), timestamp: offset + 0.02)
+            recognizer.processTouches([], timestamp: offset + 0.03)
+        }
+        XCTAssertEqual(count, 2)
+    }
+
+    func testReleasePreservesMaximumExcursionAndPartialLiftDoesNotMoveCentroid() {
+        let recognizer = GestureRecognizer()
+        recognizer.liveTriggerDistance = 1
+        var captured: GestureEvent?
+        recognizer.onGesture = { captured = $0; return true }
+        recognizer.processTouches(pair(x: 0.2), timestamp: 0)
+        recognizer.processTouches(pair(x: 0.5), timestamp: 0.01)
+        recognizer.processTouches(pair(x: 0.25), timestamp: 0.02)
+        recognizer.processTouches([ActiveTouch(identifier: 1, state: 4, normalizedX: 1, normalizedY: 1)], timestamp: 0.03)
+        recognizer.processTouches([], timestamp: 0.04)
+        XCTAssertEqual(captured?.direction, .right)
+        XCTAssertEqual(captured!.distance, 0.3, accuracy: 0.0001)
+    }
+
+    func testFourFingerSpreadUsesSpreadDistance() {
+        let recognizer = GestureRecognizer()
+        var captured: GestureEvent?
+        recognizer.onGesture = { captured = $0; return true }
+        func square(_ radius: CGFloat) -> [ActiveTouch] {
+            [(-1.0, -1.0), (-1.0, 1.0), (1.0, -1.0), (1.0, 1.0)].enumerated().map { index, point in
+                ActiveTouch(identifier: index, state: 4, normalizedX: 0.5 + CGFloat(point.0) * radius, normalizedY: 0.5 + CGFloat(point.1) * radius)
+            }
+        }
+        for frame in 0...5 { recognizer.processTouches(square(0.1), timestamp: Double(frame) * 0.005) }
+        recognizer.processTouches(square(0.2), timestamp: 0.05)
+        recognizer.processTouches([], timestamp: 0.1)
+        XCTAssertEqual(captured?.direction, .spread)
+        XCTAssertEqual(captured!.distance, sqrt(2) * 0.1, accuracy: 0.0001)
+    }
+
+    func testInvalidFrameDoesNotEndAnActiveGesture() {
+        let recognizer = GestureRecognizer()
+        recognizer.liveTriggerDistance = 1
+        var count = 0
+        recognizer.onGesture = { _ in count += 1; return true }
+        recognizer.processTouches(pair(x: 0.2), timestamp: 0)
+        recognizer.processTouches(pair(x: 0.5), timestamp: 0.01)
+        recognizer.processTouches([], timestamp: .nan)
+        XCTAssertEqual(count, 0)
+        recognizer.processTouches([], timestamp: 0.02)
+        XCTAssertEqual(count, 1)
+    }
+}
+
+extension GestureRecognizerTests {
+    func testReplacingFingerRebasesInsteadOfCreatingFalseSwipe() {
+        let recognizer = GestureRecognizer()
+        var count = 0
+        recognizer.onGesture = { _ in count += 1; return true }
+        recognizer.processTouches(pair(x: 0.2), timestamp: 0)
+        recognizer.processTouches([ActiveTouch(identifier: 1, state: 4, normalizedX: 0.2, normalizedY: 0.5)], timestamp: 0.01)
+        recognizer.processTouches([
+            ActiveTouch(identifier: 1, state: 4, normalizedX: 0.2, normalizedY: 0.5),
+            ActiveTouch(identifier: 3, state: 4, normalizedX: 0.8, normalizedY: 0.5)
+        ], timestamp: 0.02)
+        recognizer.processTouches([], timestamp: 0.03)
+        XCTAssertEqual(count, 0)
+    }
+}
+
+final class AnchoredPinchTests: XCTestCase {
+    private func contacts(fingers: Int, scale: CGFloat, translation: CGFloat = 0) -> [ActiveTouch] {
+        let points: [CGPoint] = [CGPoint(x: 0.2, y: 0.2), CGPoint(x: 0.4, y: 0.7),
+                                CGPoint(x: 0.6, y: 0.8), CGPoint(x: 0.8, y: 0.7), CGPoint(x: 0.9, y: 0.5)]
+        return points.prefix(fingers).enumerated().map { index, point in
+            ActiveTouch(identifier: index + 1, state: 4,
+                        normalizedX: 0.2 + (point.x - 0.2) * scale,
+                        normalizedY: 0.2 + (point.y - 0.2) * scale + translation)
+        }
+    }
+
+    func testFourAndFiveFingerPinchWithStationaryThumb() {
+        for fingers in [4, 5] {
+            let recognizer = GestureRecognizer()
+            var events = [GestureEvent]()
+            recognizer.onGesture = { event in
+                guard event.distance >= 0.06 else { return false }
+                events.append(event); return true
+            }
+            recognizer.processTouches(contacts(fingers: fingers, scale: 1), timestamp: 0)
+            for step in 1...20 {
+                recognizer.processTouches(contacts(fingers: fingers, scale: 1 - CGFloat(step) * 0.03), timestamp: Double(step) * 0.01)
+            }
+            recognizer.processTouches([], timestamp: 0.3)
+            XCTAssertEqual(events.map(\.direction), [.pinch])
+            XCTAssertEqual(events.first?.fingers, fingers)
+        }
+    }
+
+    func testFourAndFiveFingerSpreadWithStationaryThumb() {
+        for fingers in [4, 5] {
+            let recognizer = GestureRecognizer()
+            var events = [GestureEvent]()
+            recognizer.onGesture = { event in
+                guard event.distance >= 0.06 else { return false }
+                events.append(event); return true
+            }
+            recognizer.processTouches(contacts(fingers: fingers, scale: 0.4), timestamp: 0)
+            for step in 1...20 {
+                recognizer.processTouches(contacts(fingers: fingers, scale: 0.4 + CGFloat(step) * 0.03), timestamp: Double(step) * 0.01)
+            }
+            recognizer.processTouches([], timestamp: 0.3)
+            XCTAssertEqual(events.map(\.direction), [.spread])
+            XCTAssertEqual(events.first?.fingers, fingers)
+        }
+    }
+
+    func testSharedTranslationRemainsSwipe() {
+        let recognizer = GestureRecognizer()
+        var events = [GestureEvent]()
+        recognizer.onGesture = { events.append($0); return true }
+        recognizer.processTouches(contacts(fingers: 4, scale: 0.5), timestamp: 0)
+        for step in 1...20 {
+            recognizer.processTouches(contacts(fingers: 4, scale: 0.5, translation: CGFloat(step) * 0.01), timestamp: Double(step) * 0.01)
+        }
+        recognizer.processTouches([], timestamp: 0.3)
+        XCTAssertEqual(events.map(\.direction), [.up])
+    }
+}
+
+final class CapturedPinchRegressionTests: XCTestCase {
+    // 本机 2026-10-01 实测触点的起止位置；所有手指均移动，中心点也偏移。
+    func testAsymmetricFourAndFiveFingerPinchAndSpread() {
+        let samples: [([CGPoint], [CGPoint], GestureDirection)] = [
+            ([CGPoint(x: 0.385109, y: 0.803938), CGPoint(x: 0.553266, y: 0.914038), CGPoint(x: 0.683774, y: 0.884290), CGPoint(x: 0.308904, y: 0.197332)],
+             [CGPoint(x: 0.341563, y: 0.562884), CGPoint(x: 0.484707, y: 0.565636), CGPoint(x: 0.608087, y: 0.537900), CGPoint(x: 0.415241, y: 0.341414)], .pinch),
+            ([CGPoint(x: 0.614373, y: 0.591361), CGPoint(x: 0.366965, y: 0.606818), CGPoint(x: 0.504342, y: 0.604700), CGPoint(x: 0.412131, y: 0.346496)],
+             [CGPoint(x: 0.767561, y: 0.958924), CGPoint(x: 0.442846, y: 0.896782), CGPoint(x: 0.629860, y: 0.991001), CGPoint(x: 0.250454, y: 0.124285)], .spread),
+            ([CGPoint(x: 0.656104, y: 0.918484), CGPoint(x: 0.196280, y: 0.133072), CGPoint(x: 0.526374, y: 0.955007), CGPoint(x: 0.804368, y: 0.755029), CGPoint(x: 0.349857, y: 0.837286)],
+             [CGPoint(x: 0.573613, y: 0.607135), CGPoint(x: 0.334629, y: 0.331569), CGPoint(x: 0.450168, y: 0.627673), CGPoint(x: 0.683320, y: 0.543193), CGPoint(x: 0.311366, y: 0.565954)], .pinch),
+            ([CGPoint(x: 0.571864, y: 0.617192), CGPoint(x: 0.308774, y: 0.322465), CGPoint(x: 0.449067, y: 0.648740), CGPoint(x: 0.679368, y: 0.553779), CGPoint(x: 0.317781, y: 0.597290)],
+             [CGPoint(x: 0.676452, y: 0.948550), CGPoint(x: 0.153642, y: 0.036206), CGPoint(x: 0.542379, y: 0.979568), CGPoint(x: 0.846099, y: 0.750688), CGPoint(x: 0.357050, y: 0.865763)], .spread),
+        ]
+        for (start, end, direction) in samples {
+            let recognizer = GestureRecognizer()
+            var events = [GestureEvent]()
+            recognizer.onGesture = { event in
+                guard event.distance >= 0.06 else { return false }
+                events.append(event); return true
+            }
+            for step in 0...40 {
+                let fraction = CGFloat(step) / 40
+                let contacts = start.enumerated().map { index, point in
+                    ActiveTouch(identifier: index + 1, state: 4,
+                                normalizedX: point.x + (end[index].x - point.x) * fraction,
+                                normalizedY: point.y + (end[index].y - point.y) * fraction)
+                }
+                recognizer.processTouches(contacts, timestamp: Double(step) * 0.01)
+            }
+            recognizer.processTouches([], timestamp: 0.5)
+            XCTAssertEqual(events.map(\.direction), [direction])
+            XCTAssertEqual(events.first?.fingers, start.count)
+        }
+    }
+}

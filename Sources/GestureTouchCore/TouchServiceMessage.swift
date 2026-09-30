@@ -1,7 +1,7 @@
 import Foundation
 
-public struct TouchServiceMessage: Codable {
-    public enum Kind: String, Codable { case ready, frame, error }
+public struct TouchServiceMessage: Codable, Sendable {
+    public enum Kind: String, Codable, Sendable { case ready, frame, error }
 
     public let kind: Kind
     public let timestamp: Double?

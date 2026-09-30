@@ -23,7 +23,7 @@ final class KeySimulator {
 
     private func trigger(keys: [String], gestureName: String?, useDebounce: Bool) -> Bool {
         let (modifiers, regularKeys) = Self.classifyKeys(keys)
-        guard !regularKeys.isEmpty else { return false }
+        guard !regularKeys.isEmpty, regularKeys.allSatisfy({ Self.keyCodeFor(name: $0) != nil }) else { return false }
 
         if !AXIsProcessTrusted() {
             fputs("[KeySimulator] ❌ 无辅助功能权限\n", stderr)

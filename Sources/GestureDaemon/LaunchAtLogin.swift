@@ -10,7 +10,7 @@ enum LaunchAtLogin {
         let service = SMAppService.mainApp
         if enabled {
             if service.status != .enabled { try service.register() }
-        } else if service.status == .enabled {
+        } else if service.status == .enabled || service.status == .requiresApproval {
             try service.unregister()
         }
     }

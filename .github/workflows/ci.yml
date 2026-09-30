@@ -1,0 +1,23 @@
+name: macOS verification
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gesture-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test, build and verify application bundle
+        run: make verify CODESIGN_IDENTITY=""
+      - name: Check strict concurrency
+        run: swift build -Xswiftc -strict-concurrency=complete -Xswiftc -warnings-as-errors

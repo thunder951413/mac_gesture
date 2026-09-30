@@ -8,20 +8,22 @@ final class HotkeyListener {
 
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
-    private let rules: [AutomationRule]
+    private let rules: [(rule: AutomationRule, shortcut: KeyboardShortcut)]
     private let onRule: RuleHandler
+    private let shouldHandleEvents: () -> Bool
+    private let logDebug: Bool
     private let myPID = getpid()
-    private var activeFlags: CGEventFlags = []
-    private var consumedKeys = Set<CGKeyCode>()
-    private var pendingKeyUpRules: [CGKeyCode: AutomationRule] = [:]
+    private var pressedRules: [CGKeyCode: (rule: AutomationRule, shortcut: KeyboardShortcut)] = [:]
     private var diagnosticEventCount = 0
 
-    private static let relevantModifiers: CGEventFlags = [
-        .maskCommand, .maskShift, .maskAlternate, .maskControl, .maskSecondaryFn
-    ]
-
-    init(rules: [AutomationRule], onRule: @escaping RuleHandler) {
-        self.rules = rules.filter { $0.isEnabled && !$0.actions.isEmpty && $0.category == .keyboard }
+    init(rules: [AutomationRule], logDebug: Bool = false, shouldHandleEvents: @escaping () -> Bool = { true }, onRule: @escaping RuleHandler) {
+        self.rules = rules.compactMap { rule in
+            guard rule.isEnabled, !rule.actions.isEmpty, case .keyboard(let trigger) = rule.trigger,
+                  let shortcut = KeyboardShortcut(keys: trigger.keys) else { return nil }
+            return (rule, shortcut)
+        }
+        self.shouldHandleEvents = shouldHandleEvents
+        self.logDebug = logDebug
         self.onRule = onRule
     }
 
@@ -29,6 +31,7 @@ final class HotkeyListener {
 
     @discardableResult
     func start() -> Bool {
+        stop()
         guard !rules.isEmpty else { return true }
         let mask = (1 << CGEventType.flagsChanged.rawValue)
             | (1 << CGEventType.keyDown.rawValue)
@@ -58,11 +61,10 @@ final class HotkeyListener {
         if let eventTap { CFMachPortInvalidate(eventTap) }
         runLoopSource = nil
         eventTap = nil
-        consumedKeys.removeAll()
-        pendingKeyUpRules.removeAll()
+        pressedRules.removeAll()
     }
 
-    private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+    func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             return Unmanaged.passUnretained(event)
@@ -73,7 +75,6 @@ final class HotkeyListener {
 
         switch type {
         case .flagsChanged:
-            activeFlags = event.flags
             trace("flagsChanged flags=\(event.flags.rawValue)")
             return Unmanaged.passUnretained(event)
         case .keyDown:
@@ -90,53 +91,48 @@ final class HotkeyListener {
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
         let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
 
-        if consumedKeys.contains(keyCode) {
-            if isRepeat, let rule = matchingRule(keyCode: keyCode, flags: event.flags), case .keyboard(let trigger) = rule.trigger,
-               trigger.allowRepeat, trigger.phase == .keyDown {
-                onRule(rule)
+        if let pressed = pressedRules[keyCode] {
+            if shouldHandleEvents(), isRepeat, pressed.shortcut.matches(keyCode: keyCode, flags: event.flags),
+               pressed.rule.applicationScope.matches(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier),
+               case .keyboard(let trigger) = pressed.rule.trigger, trigger.allowRepeat, trigger.phase == .keyDown {
+                onRule(pressed.rule)
             }
             return nil
         }
 
-        guard let rule = matchingRule(keyCode: keyCode, flags: event.flags), case .keyboard(let trigger) = rule.trigger else {
-            trace("未匹配 code=\(keyCode) relevantFlags=\(event.flags.intersection(Self.relevantModifiers).rawValue)")
+        guard shouldHandleEvents(), !isRepeat,
+              let match = matchingRule(keyCode: keyCode, flags: event.flags), case .keyboard(let trigger) = match.rule.trigger else {
             return Unmanaged.passUnretained(event)
         }
+        let rule = match.rule
         DiagnosticLog.shared.write("[Keyboard] 匹配规则：\(rule.name)")
-        consumedKeys.insert(keyCode)
+        pressedRules[keyCode] = match
         if trigger.phase == .keyDown {
             if !isRepeat || trigger.allowRepeat { onRule(rule) }
-        } else {
-            pendingKeyUpRules[keyCode] = rule
         }
         return nil
     }
 
     private func handleKeyUp(_ event: CGEvent) -> Unmanaged<CGEvent>? {
         let keyCode = CGKeyCode(event.getIntegerValueField(.keyboardEventKeycode))
-        guard consumedKeys.remove(keyCode) != nil else { return Unmanaged.passUnretained(event) }
-        if let rule = pendingKeyUpRules.removeValue(forKey: keyCode) { onRule(rule) }
+        guard let pressed = pressedRules.removeValue(forKey: keyCode) else { return Unmanaged.passUnretained(event) }
+        if shouldHandleEvents(), case .keyboard(let trigger) = pressed.rule.trigger, trigger.phase == .keyUp,
+           pressed.rule.applicationScope.matches(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) {
+            onRule(pressed.rule)
+        }
         return nil
     }
 
-    private func matchingRule(keyCode: CGKeyCode, flags: CGEventFlags) -> AutomationRule? {
-        // keyDown 自身携带的 flags 比单独缓存 flagsChanged 更可靠，特别是快速组合键
-        // 与合成事件；activeFlags 仅作为部分设备未附带 flags 时的回退。
-        let eventModifiers = flags.intersection(Self.relevantModifiers)
-        let current = eventModifiers.isEmpty ? activeFlags.intersection(Self.relevantModifiers) : eventModifiers
-        return rules.first { rule in
-            guard rule.applicationScope.matches(bundleIdentifier: NSWorkspace.shared.frontmostApplication?.bundleIdentifier) else { return false }
-            guard case .keyboard(let trigger) = rule.trigger else { return false }
-            let (mods, regular) = KeySimulator.classifyKeys(trigger.keys)
-            guard regular.count == 1,
-                  let target = KeySimulator.keyCodeFor(name: regular[0]),
-                  target == keyCode else { return false }
-            return KeySimulator.modifierFlags(for: mods) == current
+    private func matchingRule(keyCode: CGKeyCode, flags: CGEventFlags) -> (rule: AutomationRule, shortcut: KeyboardShortcut)? {
+        let bundleIdentifier = NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+        return rules.first { match in
+            match.rule.applicationScope.matches(bundleIdentifier: bundleIdentifier)
+                && match.shortcut.matches(keyCode: keyCode, flags: flags)
         }
     }
 
     private func trace(_ message: String) {
-        guard diagnosticEventCount < 40 else { return }
+        guard logDebug, diagnosticEventCount < 40 else { return }
         diagnosticEventCount += 1
         DiagnosticLog.shared.write("[KeyboardTrace] \(message)")
     }

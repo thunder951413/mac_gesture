@@ -1,11 +1,13 @@
 import Foundation
 import AppKit
-import ApplicationServices
+// AX 的选项常量在 C 头文件中以可变全局声明；此处只读取系统常量。
+@preconcurrency import ApplicationServices
 import GestureTouchCore
 
 @MainActor
 final class GestureDaemon: ObservableObject {
     @Published private(set) var isRunning = false
+    @Published private(set) var isEnabled = false
     @Published private(set) var trackpadAvailable = false
     @Published private(set) var trackpadMode = "未启动"
     @Published private(set) var keyboardAvailable = false
@@ -16,11 +18,17 @@ final class GestureDaemon: ObservableObject {
     @Published private(set) var configurationWarnings: [String] = []
 
     private var configuration = AutomationConfiguration.defaults
+    private var trackpadRules: [AutomationRule] = []
     private var recognizer: GestureRecognizer?
     private var touchService: TouchServiceProvider?
     private var publicGestureProvider: PublicGestureProvider?
     private var hotkeyListener: HotkeyListener?
     private var executor: ActionExecutor?
+    private var testExecutor: ActionExecutor?
+    private var sessionID = UUID()
+    private var restartWorkItem: DispatchWorkItem?
+    private var permissionPrompted = false
+    private var isRecordingShortcut = false
     private var lastTriggerTimes: [UUID: TimeInterval] = [:]
     private var touchRestartAttempts = 0
     private var lastTouchObservationTime: TimeInterval = 0
@@ -31,12 +39,15 @@ final class GestureDaemon: ObservableObject {
     func start(configuration: AutomationConfiguration) {
         stop()
         self.configuration = configuration
+        self.configuration.settings = configuration.settings.normalized
+        isEnabled = true
         errorMessages = []
         configurationWarnings = ConfigurationValidator.warnings(for: configuration)
+        trackpadRules = configuration.rules.filter { $0.category == .trackpad && ConfigurationValidator.isExecutable($0) }
         DiagnosticLog.shared.write("[Engine] 应用配置：\(configuration.rules.count) 条规则")
         DiagnosticLog.shared.write("[Permission] 辅助功能：\(accessibilityGranted ? "已授权" : "未授权")")
         DiagnosticLog.shared.write("[Permission] 事件监听：\(CGPreflightListenEventAccess() ? "允许" : "拒绝")；事件发送：\(CGPreflightPostEventAccess() ? "允许" : "拒绝")")
-        executor = ActionExecutor(debounceMilliseconds: configuration.settings.debounceMilliseconds)
+        executor = makeExecutor()
         touchRestartAttempts = 0
         configureTrackpad()
         configureKeyboard()
@@ -49,10 +60,16 @@ final class GestureDaemon: ObservableObject {
 
     func testActions(for rule: AutomationRule) {
         DiagnosticLog.shared.write("[Rule] 手动测试：\(rule.name)")
-        execute(rule)
+        if executor == nil && testExecutor == nil { testExecutor = makeExecutor() }
+        _ = execute(rule, manually: true)
     }
 
+    func setShortcutRecording(_ recording: Bool) { isRecordingShortcut = recording }
+
     func stop() {
+        sessionID = UUID()
+        restartWorkItem?.cancel()
+        restartWorkItem = nil
         hotkeyListener?.stop()
         hotkeyListener = nil
         touchService?.stop()
@@ -60,9 +77,13 @@ final class GestureDaemon: ObservableObject {
         publicGestureProvider?.stop()
         publicGestureProvider = nil
         recognizer = nil
+        executor?.cancel()
         executor = nil
+        testExecutor?.cancel()
+        testExecutor = nil
         lastTriggerTimes.removeAll()
         isRunning = false
+        isEnabled = false
         trackpadAvailable = false
         trackpadMode = "未启动"
         keyboardAvailable = false
@@ -81,7 +102,6 @@ final class GestureDaemon: ObservableObject {
     }
 
     private func configureTrackpad() {
-        let trackpadRules = configuration.rules.filter { $0.isEnabled && !$0.actions.isEmpty && $0.category == .trackpad }
         guard !trackpadRules.isEmpty else { return }
         let recognizer = GestureRecognizer()
         let s = configuration.settings
@@ -105,10 +125,16 @@ final class GestureDaemon: ObservableObject {
     }
 
     private func configureKeyboard() {
-        let keyboardRules = configuration.rules.filter { $0.isEnabled && !$0.actions.isEmpty && $0.category == .keyboard }
+        let keyboardRules = configuration.rules.filter { ConfigurationValidator.isExecutable($0) && $0.category == .keyboard }
         guard !keyboardRules.isEmpty else { return }
-        let listener = HotkeyListener(rules: keyboardRules) { [weak self] rule in
-            DispatchQueue.main.async { self?.execute(rule) }
+        let session = sessionID
+        let listener = HotkeyListener(rules: keyboardRules, logDebug: configuration.settings.logLevel == "debug", shouldHandleEvents: { [weak self] in
+            self?.isRecordingShortcut == false
+        }) { [weak self] rule in
+            DispatchQueue.main.async {
+                guard let self, self.sessionID == session, self.isEnabled else { return }
+                _ = self.execute(rule)
+            }
         }
         hotkeyListener = listener
         keyboardAvailable = listener.start()
@@ -138,16 +164,22 @@ final class GestureDaemon: ObservableObject {
             DiagnosticLog.shared.write("[Trackpad] 进入兼容模式：\(reason)")
             updateRunningState()
         case .failed(let reason):
+            trackpadAvailable = false
+            updateRunningState()
+            recognizer?.reset()
             if touchRestartAttempts < 1 {
                 touchRestartAttempts += 1
                 appendErrorOnce("高级触控板服务异常，正在自动重启一次：\(reason)")
                 DiagnosticLog.shared.write("[Trackpad] 服务异常并重启：\(reason)")
                 touchService?.stop()
                 touchService = nil
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                    guard let self, self.recognizer != nil else { return }
+                let session = sessionID
+                let restart = DispatchWorkItem { [weak self] in
+                    guard let self, self.sessionID == session, self.isEnabled else { return }
                     self.launchAdvancedTouchService()
                 }
+                restartWorkItem = restart
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5, execute: restart)
             } else {
                 startPublicFallback(reason: reason)
             }
@@ -198,12 +230,14 @@ final class GestureDaemon: ObservableObject {
     }
 
     private func handleGesture(_ event: GestureEvent) -> Bool {
+        guard isEnabled else { return false }
         let observation = "\(event.fingers) 指 · \(event.direction.title) · 距离 \(String(format: "%.3f", event.distance))"
-        let matchedRule = configuration.rules.first(where: { rule in
-            guard rule.isEnabled, !rule.actions.isEmpty, case .trackpad(let trigger) = rule.trigger else { return false }
+        let bundleIdentifier = frontmostBundleIdentifier
+        let matchedRule = trackpadRules.first(where: { rule in
+            guard case .trackpad(let trigger) = rule.trigger else { return false }
             guard trigger.fingers == event.fingers, trigger.direction == event.direction else { return false }
             let distance = trigger.direction == .down ? max(0, -event.dy) : event.distance
-            return distance >= CGFloat(trigger.minimumDistance) && rule.applicationScope.matches(bundleIdentifier: frontmostBundleIdentifier)
+            return distance >= CGFloat(trigger.minimumDistance) && rule.applicationScope.matches(bundleIdentifier: bundleIdentifier)
         })
         // live-trigger 未命中时识别器每帧重试，观察信息与日志按时间窗节流，
         // 避免滑动期间高频刷新 UI 与刷写诊断日志。规则匹配与执行不受影响。
@@ -214,27 +248,50 @@ final class GestureDaemon: ObservableObject {
             DiagnosticLog.shared.write("[Gesture] \(observation)" + (matchedRule == nil ? "；没有匹配的启用规则" : ""))
         }
         guard let matchedRule else { return false }
-        execute(matchedRule)
-        return true
+        return execute(matchedRule)
     }
 
-    private func execute(_ rule: AutomationRule) {
-        guard rule.applicationScope.matches(bundleIdentifier: frontmostBundleIdentifier) else { return }
+    private func execute(_ rule: AutomationRule, manually: Bool = false) -> Bool {
+        guard manually || (isEnabled && rule.applicationScope.matches(bundleIdentifier: frontmostBundleIdentifier)) else { return false }
+        guard !rule.actions.isEmpty, rule.actions.allSatisfy(ConfigurationValidator.isValid) else {
+            let message = "规则“\(rule.name)”的动作为空或无效，请先修正配置"
+            lastEvent = message
+            appendErrorOnce(message)
+            return true
+        }
         if rule.actions.contains(where: { $0.kind == .keyboardShortcut }) && !accessibilityGranted {
             let message = "规则“\(rule.name)”已匹配，但辅助功能未授权，无法发送按键"
             lastEvent = message
             appendErrorOnce(message)
             DiagnosticLog.shared.write("[Permission] \(message)")
-            requestAccessibilityPermission()
-            return
+            if !permissionPrompted { permissionPrompted = true; requestAccessibilityPermission() }
+            return true
         }
         let now = ProcessInfo.processInfo.systemUptime
         let debounce = TimeInterval(max(0, configuration.settings.debounceMilliseconds)) / 1000
-        if let last = lastTriggerTimes[rule.id], now - last < debounce { return }
-        lastTriggerTimes[rule.id] = now
+        if !manually, let last = lastTriggerTimes[rule.id], now - last < debounce { return true }
+        guard (manually ? (executor ?? testExecutor) : executor)?.execute(rule.actions, ruleName: rule.name) == true else {
+            appendErrorOnce("动作队列已满，已跳过“\(rule.name)”")
+            return true
+        }
+        if !manually { lastTriggerTimes[rule.id] = now }
         lastEvent = "\(rule.name) · \(Date().formatted(date: .omitted, time: .standard))"
         DiagnosticLog.shared.write("[Rule] 触发：\(rule.name)")
-        executor?.execute(rule.actions, ruleName: rule.name)
+        return true
+    }
+
+    private func makeExecutor() -> ActionExecutor {
+        let executor = ActionExecutor(debounceMilliseconds: configuration.settings.debounceMilliseconds)
+        let session = sessionID
+        executor.onCompletion = { [weak self] name, failure in
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.sessionID == session, let failure else { return }
+                let message = "规则“\(name)”执行失败：\(failure)"
+                self.lastEvent = message
+                self.appendErrorOnce(message)
+            }
+        }
+        return executor
     }
 
     private var frontmostBundleIdentifier: String? {

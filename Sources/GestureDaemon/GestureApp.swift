@@ -8,25 +8,28 @@ private func activateGestureApp() {
     else { NSApp.activate(ignoringOtherApps: true) }
 }
 
+// 窗口和菜单栏由 AppKit 管理，SwiftUI 只负责设置内容。使用空 Settings
+// scene 会额外生成空白窗口，并且不会给独立 NSHostingController 安装工具栏。
 @main
-struct GestureApp: App {
-    @NSApplicationDelegateAdaptor(GestureAppDelegate.self) private var appDelegate
-    @StateObject private var model = AppModel()
-
-    var body: some Scene {
-        Settings {
-            EmptyView()
-        }
-        .commands {
-            CommandGroup(replacing: .appSettings) {
-                Button("Gesture 设置…") { model.showSettingsWindow() }
-                    .keyboardShortcut(",", modifiers: .command)
-            }
-        }
+@MainActor
+enum GestureApp {
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = GestureAppDelegate()
+        application.delegate = delegate
+        withExtendedLifetime(delegate) { application.run() }
     }
 }
 
+@MainActor
 final class GestureAppDelegate: NSObject, NSApplicationDelegate {
+    private var model: AppModel?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        installMainMenu()
+        model = AppModel()
+    }
+
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
         false
     }
@@ -35,6 +38,61 @@ final class GestureAppDelegate: NSObject, NSApplicationDelegate {
         NotificationCenter.default.post(name: .gestureShowSettings, object: nil)
         return true
     }
+
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+        let applicationItem = NSMenuItem()
+        let applicationMenu = NSMenu(title: "Gesture")
+        for (title, selector, key) in [
+            ("Gesture 设置…", #selector(showSettings), ","),
+            ("保存并应用", #selector(saveAndApply), "s")
+        ] {
+            let item = NSMenuItem(title: title, action: selector, keyEquivalent: key)
+            item.target = self
+            applicationMenu.addItem(item)
+        }
+        applicationMenu.addItem(.separator())
+        let hide = NSMenuItem(title: "隐藏 Gesture", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        hide.target = NSApp
+        applicationMenu.addItem(hide)
+        let hideOthers = NSMenuItem(title: "隐藏其他应用", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
+        hideOthers.keyEquivalentModifierMask = [.command, .option]
+        hideOthers.target = NSApp
+        applicationMenu.addItem(hideOthers)
+        applicationMenu.addItem(.separator())
+        let quit = NSMenuItem(title: "退出 Gesture", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        quit.target = NSApp
+        applicationMenu.addItem(quit)
+        applicationItem.submenu = applicationMenu
+        mainMenu.addItem(applicationItem)
+
+        let fileItem = NSMenuItem()
+        let fileMenu = NSMenu(title: "文件")
+        fileMenu.addItem(NSMenuItem(title: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w"))
+        fileItem.submenu = fileMenu
+        mainMenu.addItem(fileItem)
+
+        let editItem = NSMenuItem()
+        let editMenu = NSMenu(title: "编辑")
+        for (title, selector, key) in [
+            ("撤销", NSSelectorFromString("undo:"), "z"),
+            ("重做", NSSelectorFromString("redo:"), "Z"),
+            ("剪切", #selector(NSText.cut(_:)), "x"),
+            ("复制", #selector(NSText.copy(_:)), "c"),
+            ("粘贴", #selector(NSText.paste(_:)), "v"),
+            ("全选", #selector(NSText.selectAll(_:)), "a")
+        ] {
+            let item = NSMenuItem(title: title, action: selector, keyEquivalent: key.lowercased())
+            if key == "Z" { item.keyEquivalentModifierMask = [.command, .shift] }
+            editMenu.addItem(item)
+        }
+        editItem.submenu = editMenu
+        mainMenu.addItem(editItem)
+        NSApp.mainMenu = mainMenu
+    }
+
+    @objc private func showSettings() { model?.showSettingsWindow() }
+    @objc private func saveAndApply() { model?.saveAndApply() }
 }
 
 private extension Notification.Name {
@@ -53,8 +111,7 @@ final class AppModel: ObservableObject {
     init() {
         store = ConfigurationStore()
         store.objectWillChange.sink { [weak self] _ in self?.objectWillChange.send() }.store(in: &subscriptions)
-        engine.objectWillChange.sink { [weak self] _ in
-            self?.objectWillChange.send()
+        engine.$isRunning.removeDuplicates().dropFirst().sink { [weak self] _ in
             DispatchQueue.main.async { self?.statusItemController.refresh() }
         }.store(in: &subscriptions)
         NotificationCenter.default.publisher(for: NSApplication.didFinishLaunchingNotification)
@@ -66,16 +123,14 @@ final class AppModel: ObservableObject {
         NotificationCenter.default.publisher(for: .gestureShowSettings)
             .sink { [weak self] _ in self?.showSettingsWindow() }
             .store(in: &subscriptions)
+        NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)
+            .sink { [weak self] _ in self?.engine.stop() }
+            .store(in: &subscriptions)
         if !FileManager.default.fileExists(atPath: store.url.path) { store.saveReportingError() }
         engine.start(configuration: store.configuration)
         DispatchQueue.main.async { [weak self] in
             self?.applyAppearanceSettings()
             self?.showInitialSettingsWindowIfNeeded()
-        }
-        if !engine.accessibilityGranted {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) { [weak self] in
-                self?.engine.requestAccessibilityPermission()
-            }
         }
     }
 
@@ -83,7 +138,7 @@ final class AppModel: ObservableObject {
         store.saveReportingError()
         guard store.lastError == nil else { return }
         do { try LaunchAtLogin.apply(enabled: store.configuration.settings.launchAtLogin) }
-        catch { fputs("[Gesture] 登录启动设置失败：\(error.localizedDescription)\n", stderr) }
+        catch { store.reportError(error) }
         applyAppearanceSettings()
         engine.apply(configuration: store.configuration)
     }
@@ -96,22 +151,20 @@ final class AppModel: ObservableObject {
     }
 
     func setDockIconHidden(_ hidden: Bool) {
-        store.configuration.settings.hideDockIcon = hidden
-        saveAppearanceAndApply()
+        saveAppearanceAndApply(\.hideDockIcon, value: hidden)
     }
 
     func setMenuBarIconHidden(_ hidden: Bool) {
-        store.configuration.settings.hideMenuBarIcon = hidden
-        saveAppearanceAndApply()
+        saveAppearanceAndApply(\.hideMenuBarIcon, value: hidden)
     }
 
     func showSettingsWindow() {
         settingsWindowCoordinator.show()
     }
 
-    private func saveAppearanceAndApply() {
-        store.saveReportingError()
-        guard store.lastError == nil else { return }
+    private func saveAppearanceAndApply(_ keyPath: WritableKeyPath<EngineSettings, Bool>, value: Bool) {
+        do { try store.saveAppearance(keyPath, value: value) }
+        catch { store.reportError(error); return }
         applyAppearanceSettings()
     }
 
@@ -125,15 +178,16 @@ final class AppModel: ObservableObject {
         let settings = store.configuration.settings
         statusItemController.setVisible(!settings.hideMenuBarIcon)
         let policy: NSApplication.ActivationPolicy = settings.hideDockIcon ? .accessory : .regular
+        let policyChanged = NSApp.activationPolicy() != policy
         let visibleWindows = NSApp.windows.filter(\.isVisible)
-        if NSApp.activationPolicy() != policy { NSApp.setActivationPolicy(policy) }
+        if policyChanged { NSApp.setActivationPolicy(policy) }
         // 切换 regular/accessory 会让 SwiftUI 窗口短暂失去前台身份。
         // 下一轮 RunLoop 恢复原有可见窗口，避免用户感觉设置页“跳走”。
-        DispatchQueue.main.async {
+        if policyChanged && !visibleWindows.isEmpty { DispatchQueue.main.async {
             activateGestureApp()
             visibleWindows.forEach { $0.orderFront(nil) }
             visibleWindows.first(where: { $0.canBecomeKey })?.makeKeyAndOrderFront(nil)
-        }
+        } }
         DiagnosticLog.shared.write("[Appearance] Dock：\(settings.hideDockIcon ? "隐藏" : "显示")；菜单栏：\(settings.hideMenuBarIcon ? "隐藏" : "显示")；policy=\(policy.rawValue)")
     }
 }
@@ -186,7 +240,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
         }
         menu.addItem(.separator())
         menu.addItem(item("打开设置…", action: #selector(openSettings)))
-        menu.addItem(item(model.engine.isRunning ? "停止引擎" : "启动引擎", action: #selector(toggleEngine)))
+        menu.addItem(item(model.engine.isEnabled ? "停止引擎" : "启动引擎", action: #selector(toggleEngine)))
         menu.addItem(.separator())
         menu.addItem(item("退出 Gesture", action: #selector(terminate), key: "q"))
     }
@@ -205,7 +259,7 @@ private final class StatusItemController: NSObject, NSMenuDelegate {
 
     @objc private func toggleEngine() {
         guard let model else { return }
-        if model.engine.isRunning { model.engine.stop() }
+        if model.engine.isEnabled { model.engine.stop() }
         else { model.engine.start(configuration: model.store.configuration) }
     }
 
@@ -251,14 +305,14 @@ private final class SettingsWindowCoordinator: NSObject, NSWindowDelegate {
             defer: false
         )
         window.title = "Gesture 设置"
-        window.minSize = NSSize(width: 900, height: 600)
+        window.contentMinSize = NSSize(width: 900, height: 600)
         // 菜单栏应用需要在设置页关闭后继续运行。保留轻量窗口外壳，
         // 但 windowWillClose 会释放真正昂贵的 SwiftUI 内容树。
         window.isReleasedWhenClosed = false
         window.tabbingMode = .disallowed
         installContent(in: window)
         window.setFrameAutosaveName("GestureSettingsWindowV3")
-        if window.frame.width < 900 || window.frame.height < 600 {
+        if window.frame.width < window.minSize.width || window.frame.height < window.minSize.height {
             window.setContentSize(NSSize(width: 1080, height: 700))
             window.center()
         }

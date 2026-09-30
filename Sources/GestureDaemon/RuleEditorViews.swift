@@ -80,8 +80,8 @@ struct RuleEditorView: View {
     private var actionsEditor: some View {
         VStack(spacing: 12) {
             ForEach($rule.actions) { $action in
-                ActionEditor(action: $action) {
-                    rule.actions.removeAll { $0.id == action.id }
+                ActionEditor(action: $action) { [actionID = action.id] in
+                    rule.actions.removeAll { $0.id == actionID }
                 }
             }
             Menu {
@@ -197,9 +197,11 @@ private struct ActionEditor: View {
     }
 }
 
+@MainActor
 struct ShortcutCaptureButton: View {
+    @EnvironmentObject private var model: AppModel
     @Binding var keys: [String]
-    @ObservedObject private var recorder = ShortcutRecorderState()
+    @StateObject private var recorder = ShortcutRecorderState()
 
     var body: some View {
         Button {
@@ -215,34 +217,59 @@ struct ShortcutCaptureButton: View {
         .buttonStyle(.bordered)
         .help("点击后直接按下想要录制的组合键")
         .onDisappear { stopRecording() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didResignActiveNotification)) { _ in stopRecording() }
     }
 
     private func startRecording() {
+        if recorder.isRecording { stopRecording(); return }
         stopRecording()
+        recorder.begin { model.engine.setShortcutRecording(false) }
         recorder.isRecording = true
+        model.engine.setShortcutRecording(true)
         recorder.monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
             var captured: [String] = []
             if event.modifierFlags.contains(.control) { captured.append("ctrl") }
             if event.modifierFlags.contains(.option) { captured.append("option") }
             if event.modifierFlags.contains(.shift) { captured.append("shift") }
             if event.modifierFlags.contains(.command) { captured.append("cmd") }
-            if event.modifierFlags.contains(.function) { captured.append("fn") }
-            if let name = KeyNames.name(for: CGKeyCode(event.keyCode)) { captured.append(name) }
-            if !captured.isEmpty { keys = captured }
+            let code = CGKeyCode(event.keyCode)
+            let flags = KeyboardShortcut.eventModifiers(CGEventFlags(rawValue: UInt64(event.modifierFlags.rawValue)), keyCode: code)
+            if flags.contains(.maskSecondaryFn) { captured.append("fn") }
+            guard let name = KeyNames.name(for: code) else { return nil }
+            captured.append(name)
+            keys = captured
             stopRecording()
             return nil
         }
+        if recorder.monitor == nil { stopRecording() }
     }
 
     private func stopRecording() {
-        if let monitor = recorder.monitor { NSEvent.removeMonitor(monitor) }
-        recorder.monitor = nil; recorder.isRecording = false
+        recorder.stop()
     }
 }
 
+@MainActor
 private final class ShortcutRecorderState: ObservableObject {
+    private static weak var current: ShortcutRecorderState?
     @Published var isRecording = false
     var monitor: Any?
+    private var onStop: (() -> Void)?
+
+    func begin(onStop: @escaping () -> Void) {
+        Self.current?.stop()
+        Self.current = self
+        self.onStop = onStop
+    }
+
+    func stop() {
+        if let monitor { NSEvent.removeMonitor(monitor) }
+        monitor = nil
+        isRecording = false
+        onStop?()
+        onStop = nil
+        if Self.current === self { Self.current = nil }
+    }
 }
 
 enum KeyNames {
@@ -305,7 +332,7 @@ struct EngineSettingsView: View {
                 HStack(spacing: 8) {
                     Button(engine.isRunning ? "重新启动引擎" : "启动引擎") { engine.start(configuration: model.store.configuration) }
                         .buttonStyle(.borderedProminent)
-                    if engine.isRunning {
+                    if engine.isEnabled {
                         Button("停止") { engine.stop() }
                             .buttonStyle(.bordered)
                     }

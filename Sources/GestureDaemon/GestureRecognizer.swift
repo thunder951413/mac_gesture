@@ -26,6 +26,17 @@ struct GestureTuning {
 
 final class GestureRecognizer {
     private var palmFilter = PalmRejectionFilter()
+    private var traceBuffer = GestureTraceBuffer()
+    private var recordedRejectedSwipe = false
+    private var recordedIgnoredLateTouch = false
+    private var gestureBeganTimestamp: Double = 0
+    private var lockedTouchIdentifiers: Set<Int>?
+    private var currentGesturePositions: [Int: CGPoint] = [:]
+    private var maxGesturePositions: [Int: CGPoint] = [:]
+    private var maxSwipePositions: [Int: CGPoint] = [:]
+    private var maxSwipeDx: CGFloat = 0
+    private var maxSwipeDy: CGFloat = 0
+    private var maxSwipeDistance: CGFloat = 0
     private(set) var acceptedTouchCount = 0
     private(set) var rejectedPalmCount = 0
     private var activeTouches: [Int: ActiveTouch] = [:]
@@ -47,6 +58,7 @@ final class GestureRecognizer {
     private var gestureTouchIdentifiers = Set<Int>()
 
     var onGesture: ((GestureEvent) -> Bool)?
+    var onTrace: ((GestureTrace) -> Void)?
     var tuning = GestureTuning()
 
     /// 兼容旧接口：逐字段 setter，由 GestureDaemon 从 Config 注入
@@ -69,9 +81,30 @@ final class GestureRecognizer {
 
     func processTouches(_ rawTouches: [ActiveTouch], timestamp: Double) {
         guard timestamp.isFinite, TouchFrameValidator.isValid(rawTouches) else { return }
-        let touches = palmFilter.filter(rawTouches, timestamp: timestamp)
+        if onTrace != nil { traceBuffer.append(rawTouches, timestamp: timestamp) }
+        let nonPalms = palmFilter.filter(rawTouches, timestamp: timestamp)
+        let rejected = Set(rawTouches.map(\.identifier)).subtracting(nonPalms.map(\.identifier))
+        var touches = nonPalms.filter(\.isTouching)
+        // 已经持续移动的两指手势固定原手指组；中途贴上的掌缘不能升级它。
+        // 初始落指留出 80 ms 的组合窗口，尚未移动的手势仍可增加手指。
+        if lockedTouchIdentifiers == nil, gestureFingers == 2,
+           maxGestureDistance >= 0.03, timestamp - gestureBeganTimestamp >= 0.08 {
+            lockedTouchIdentifiers = gestureTouchIdentifiers
+        }
+        if let lockedTouchIdentifiers {
+            let previousCount = touches.count
+            touches = touches.filter { lockedTouchIdentifiers.contains($0.identifier) }
+            if previousCount > touches.count, !recordedIgnoredLateTouch {
+                recordedIgnoredLateTouch = true
+                let direction: GestureDirection = abs(maxGestureDx) > abs(maxGestureDy)
+                    ? (maxGestureDx > 0 ? .right : .left) : (maxGestureDy > 0 ? .up : .down)
+                emitTrace(decision: .ignoredLateContact,
+                          event: GestureEvent(fingers: 2, direction: direction,
+                                              distance: maxGestureDistance, dx: maxGestureDx, dy: maxGestureDy),
+                          positions: currentGesturePositions)
+            }
+        }
         let activeSet = Set(touches.map { $0.identifier })
-        let rejected = Set(rawTouches.map(\.identifier)).subtracting(activeSet)
         // 掌缘被确认时移除它对指数量、中心点和位移的影响；真实手指已有
         // 起点时保留其轨迹，避免过滤较晚的掌缘吞掉正常两指滑动。
         if !rejected.isDisjoint(with: activeTouches.keys) {
@@ -136,12 +169,14 @@ final class GestureRecognizer {
         updateCentroid()
 
         if gestureStartCentroid == nil {
+            gestureBeganTimestamp = timestamp
             gestureStartCentroid = currentCentroid
             startSpread = calculateSpread()
             resetMaxGestureDisplacement()
         }
 
         if !didTriggerCurrentGesture && (effectiveCount > gestureFingers || activeSet != gestureTouchIdentifiers) {
+            gestureBeganTimestamp = timestamp
             gestureFingers = effectiveCount
             gestureTouchIdentifiers = activeSet
             gestureStartCentroid = currentCentroid
@@ -191,9 +226,9 @@ final class GestureRecognizer {
         let currentDx = currentCentroid.x - start.x
         let currentDy = currentCentroid.y - start.y
         let currentDistance = sqrt(currentDx * currentDx + currentDy * currentDy)
-        let dx = maxGestureDistance > currentDistance ? maxGestureDx : currentDx
-        let dy = maxGestureDistance > currentDistance ? maxGestureDy : currentDy
-        let totalDistance = max(maxGestureDistance, currentDistance)
+        var dx = maxGestureDistance > currentDistance ? maxGestureDx : currentDx
+        var dy = maxGestureDistance > currentDistance ? maxGestureDy : currentDy
+        var totalDistance = max(maxGestureDistance, currentDistance)
 
         let spreadDelta = endSpread - startSpread
         let spreadSignificant = abs(spreadDelta) > tuning.spreadThreshold
@@ -202,6 +237,24 @@ final class GestureRecognizer {
         if fingers >= 4 && spreadSignificant && abs(spreadDelta) > min(totalDistance, maxCoherentTranslationDistance) * tuning.spreadToDistanceRatio {
             direction = spreadDelta > 0 ? .spread : .pinch
         } else if totalDistance > tuning.minSwipeDistance {
+            if fingers >= 3 {
+                // 只使用每根手指共同运动时的峰值，不能用两指+静止掌缘的
+                // 中心点峰值触发规则，也不能在抬手时绕过这道检查。
+                if !recordedRejectedSwipe, totalDistance >= tuning.liveTriggerDistance,
+                   maxSwipeDistance < tuning.liveTriggerDistance {
+                    recordedRejectedSwipe = true
+                    let direction: GestureDirection = abs(dx) > abs(dy)
+                        ? (dx > 0 ? .right : .left) : (dy > 0 ? .up : .down)
+                    emitTrace(decision: .rejectedIncoherentSwipe,
+                              event: GestureEvent(fingers: fingers, direction: direction,
+                                                  distance: totalDistance, dx: dx, dy: dy),
+                              positions: maxGestureDistance > currentDistance ? maxGesturePositions : currentGesturePositions)
+                }
+                guard maxSwipeDistance > tuning.minSwipeDistance else { return nil }
+                dx = maxSwipeDx
+                dy = maxSwipeDy
+                totalDistance = maxSwipeDistance
+            }
             let absDx = abs(dx)
             let absDy = abs(dy)
             let minor = min(absDx, absDy)
@@ -248,6 +301,7 @@ final class GestureRecognizer {
 
     func reset() {
         palmFilter.reset()
+        traceBuffer.reset()
         acceptedTouchCount = 0
         rejectedPalmCount = 0
         resetGesture()
@@ -255,6 +309,10 @@ final class GestureRecognizer {
 
     // 手指抬起后掌缘可能仍在，不能在每个手势结束时清除掌缘生命周期。
     private func resetGesture() {
+        recordedRejectedSwipe = false
+        recordedIgnoredLateTouch = false
+        lockedTouchIdentifiers = nil
+        gestureBeganTimestamp = 0
         activeTouches.removeAll()
         gestureStartCentroid = nil
         gestureStartPositions.removeAll()
@@ -313,6 +371,7 @@ final class GestureRecognizer {
 
     private func updateMaxGestureDisplacement() {
         guard let start = gestureStartCentroid else { return }
+        currentGesturePositions = activeTouches.mapValues { CGPoint(x: $0.normalizedX, y: $0.normalizedY) }
         let dx = currentCentroid.x - start.x
         let dy = currentCentroid.y - start.y
         let distance = sqrt(dx * dx + dy * dy)
@@ -320,6 +379,15 @@ final class GestureRecognizer {
             maxGestureDx = dx
             maxGestureDy = dy
             maxGestureDistance = distance
+            maxGesturePositions = currentGesturePositions
+        }
+        if distance > maxSwipeDistance,
+           SwipeMotion.isCoherent(start: gestureStartPositions, end: currentGesturePositions,
+                                  dx: dx, dy: dy, minimumDistance: tuning.minSwipeDistance) {
+            maxSwipeDx = dx
+            maxSwipeDy = dy
+            maxSwipeDistance = distance
+            maxSwipePositions = currentGesturePositions
         }
     }
 
@@ -327,10 +395,36 @@ final class GestureRecognizer {
         gestureStartPositions = startPositions ?? activeTouches.mapValues {
             CGPoint(x: $0.normalizedX, y: $0.normalizedY)
         }
+        currentGesturePositions = gestureStartPositions
+        maxGesturePositions = gestureStartPositions
+        maxSwipePositions = [:]
+        maxSwipeDx = 0
+        maxSwipeDy = 0
+        maxSwipeDistance = 0
         maxCoherentTranslationDistance = 0
         maxGestureDx = 0
         maxGestureDy = 0
         maxGestureDistance = 0
+    }
+
+    func recordTriggeredGesture(_ event: GestureEvent) {
+        let isSwipe = event.direction != .pinch && event.direction != .spread && event.fingers >= 3
+        emitTrace(decision: .ruleTriggered, event: event,
+                  positions: isSwipe ? maxSwipePositions : currentGesturePositions)
+    }
+
+    private func emitTrace(decision: GestureTrace.Decision, event: GestureEvent,
+                           positions: [Int: CGPoint]) {
+        guard let onTrace else { return }
+        let motions = gestureStartPositions.keys.sorted().compactMap { identifier -> GestureTrace.Motion? in
+            guard let origin = gestureStartPositions[identifier], let end = positions[identifier] else { return nil }
+            return GestureTrace.Motion(identifier: identifier,
+                                       startX: Double(origin.x), startY: Double(origin.y),
+                                       endX: Double(end.x), endY: Double(end.y))
+        }
+        onTrace(GestureTrace(decision: decision, fingers: event.fingers, direction: event.direction,
+                             distance: Double(event.distance), dx: Double(event.dx), dy: Double(event.dy),
+                             motions: motions, frames: traceBuffer.frames))
     }
 
     private func calculateSpread() -> CGFloat {

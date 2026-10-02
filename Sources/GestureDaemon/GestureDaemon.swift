@@ -116,6 +116,18 @@ final class GestureDaemon: ObservableObject {
             if Thread.isMainThread { return self.handleGesture(event) }
             return DispatchQueue.main.sync { self.handleGesture(event) }
         }
+        recognizer.onTrace = { [weak self] trace in
+            guard let self else { return }
+            GestureTraceLog.shared.write(trace)
+            if trace.decision == .rejectedIncoherentSwipe {
+                let observation = "已忽略 \(trace.fingers) 指滑动：触点未共同移动"
+                self.lastGestureObservation = observation
+                DiagnosticLog.shared.write("[GestureGuard] \(observation)")
+            } else if trace.decision == .ignoredLateContact {
+                self.lastGestureObservation = "已保留两指滑动：新增触点未计入手指数"
+                DiagnosticLog.shared.write("[GestureGuard] \(self.lastGestureObservation)")
+            }
+        }
         self.recognizer = recognizer
         if configuration.settings.useCompatibilityTrackpadMode {
             startPublicFallback(reason: "已手动选择兼容模式")
@@ -191,7 +203,8 @@ final class GestureDaemon: ObservableObject {
         let service = TouchServiceProvider()
         service.onFrame = { [weak self, weak recognizer] touches, timestamp in
             recognizer?.processTouches(touches, timestamp: timestamp)
-            self?.observeTouches(touches, rejectedPalms: recognizer?.rejectedPalmCount ?? 0)
+            self?.observeTouches(touches, acceptedFingers: recognizer?.acceptedTouchCount ?? 0,
+                                 rejectedPalms: recognizer?.rejectedPalmCount ?? 0)
         }
         service.onStateChange = { [weak self] state in self?.handleTouchServiceState(state) }
         touchService = service
@@ -248,10 +261,10 @@ final class GestureDaemon: ObservableObject {
             DiagnosticLog.shared.write("[Gesture] \(observation)" + (matchedRule == nil ? "；没有匹配的启用规则" : ""))
         }
         guard let matchedRule else { return false }
-        return execute(matchedRule)
+        return execute(matchedRule, gesture: event)
     }
 
-    private func execute(_ rule: AutomationRule, manually: Bool = false) -> Bool {
+    private func execute(_ rule: AutomationRule, manually: Bool = false, gesture: GestureEvent? = nil) -> Bool {
         guard manually || (isEnabled && rule.applicationScope.matches(bundleIdentifier: frontmostBundleIdentifier)) else { return false }
         guard !rule.actions.isEmpty, rule.actions.allSatisfy(ConfigurationValidator.isValid) else {
             let message = "规则“\(rule.name)”的动作为空或无效，请先修正配置"
@@ -275,6 +288,10 @@ final class GestureDaemon: ObservableObject {
             return true
         }
         if !manually { lastTriggerTimes[rule.id] = now }
+        if let gesture {
+            recognizer?.recordTriggeredGesture(gesture)
+            DiagnosticLog.shared.write("[GestureMatch] \(gesture.fingers) 指 · \(gesture.direction.title) · 距离 \(String(format: "%.3f", gesture.distance)) · dx=\(String(format: "%.3f", gesture.dx)) dy=\(String(format: "%.3f", gesture.dy))")
+        }
         lastEvent = "\(rule.name) · \(Date().formatted(date: .omitted, time: .standard))"
         DiagnosticLog.shared.write("[Rule] 触发：\(rule.name)")
         return true
@@ -298,16 +315,15 @@ final class GestureDaemon: ObservableObject {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier
     }
 
-    private func observeTouches(_ touches: [ActiveTouch], rejectedPalms: Int) {
+    private func observeTouches(_ touches: [ActiveTouch], acceptedFingers: Int, rejectedPalms: Int) {
         let now = ProcessInfo.processInfo.systemUptime
         guard touches.isEmpty || now - lastTouchObservationTime >= 0.1 else { return }
         lastTouchObservationTime = now
         if touches.isEmpty {
             lastTouchObservation = "触点已全部抬起"
-        } else if rejectedPalms > 0 {
-            lastTouchObservation = "\(touches.count - rejectedPalms) 个手指触点，已过滤 \(rejectedPalms) 个掌缘触点"
         } else {
-            lastTouchObservation = "正在接收 \(touches.count) 个触点"
+            lastTouchObservation = "收到 \(touches.count) 个触点，手势使用 \(acceptedFingers) 指"
+            if rejectedPalms > 0 { lastTouchObservation += "，已过滤 \(rejectedPalms) 个掌缘触点" }
         }
     }
 }

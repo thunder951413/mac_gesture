@@ -19,6 +19,7 @@ Gesture 是一个原生 macOS 触控板手势与组合键自动化工具。它�
 - 规则优先级可通过工具栏上移、下移调整
 - 状态页实时显示最近触点、最近识别结果和最近触发规则
 - 诊断日志保存到 `~/Library/Logs/Gesture/gesture.log`
+- 多指误触防护与规则命中的短段触点诊断，支持回放定位
 - 旧版 `gestures/hotkeys/settings` JSON 自动迁移到 schema v2
 - 配置原子保存到 `~/.gesture/config.json`，保存后立即热应用
 
@@ -128,6 +129,8 @@ Gesture.app ── JSON Lines ──> GestureTouchService ──> MultitouchSupp
 - `TouchServiceStreamDecoder.swift`：有界 JSON Lines 解析、分包处理和触点验证
 - `PublicGestureAccumulator.swift`：公开事件累计，丢弃惯性滚动和取消的手势
 - `GestureRecognizer.swift`：多指手势识别状态
+- `SwipeMotion.swift`：多指共同平移校验
+- `GestureTraceLog.swift`：有界触点诊断与日志轮转
 - `HotkeyListener.swift`：完整 key-down/key-up Event Tap
 - `GestureDaemon.swift`：输入模块生命周期与规则匹配
 - `ActionExecutor.swift`：串行动作执行
@@ -144,6 +147,10 @@ Apple 没有提供能够读取全部原始触点的公开 API，因此高级触�
 辅助进程使用专用文件描述符发送 JSON Lines，并将框架自己的 stdout 诊断转到 stderr，避免正常设备输出触发错误降级。触点记录按完整的 96 字节步长读取并校验，不能按已用字段的末尾截断数组步长。
 
 高级模式会在手势识别前过滤掌缘：将接触椭圆和面积代理值与同一帧的两个较小指尖比较，结合边缘起点及停留轨迹，连续确认后排除明显的掌缘触点。已确认的掌缘保持过滤直到该触点抬起，因此手掌贴着时重复两指滑动不会累积成三指手势。状态页显示有效手指和已过滤的掌缘数量；较大的拇指、短暂的单帧形变及缺少尺寸数据的旧输入有回归覆盖。尺寸使用设备内相对比例，参考 [libinput 掌缘检测策略](https://wayland.freedesktop.org/libinput/doc/latest/palm-detection.html)；不同设备及接触姿势仍需实测。
+
+原始触点还包含悬停和离开过程；高级模式只将 `makeTouch` / `touching`（状态 3 / 4）计入手指数，参见 [Hammerspoon 原始触点状态说明](https://github.com/asmagill/hs._asm.undocumented.touchdevice)。三指及以上滑动要求每根手指沿共同方向移动，静止或反向移动的掌缘不能仅凭中心点位移触发。两指滚动持续至少 80 ms 且已移动 0.03 后固定这次手势的手指组；中途增加手指时，需要抬手重新开始多指手势。初始错开落指仍受支持，四指及五指捏合/张开保留独立的形变判断。
+
+规则真正入队以及共同移动校验拒绝、新增触点被忽略时，会将最近最多 2 秒、192 帧的原始触点和判断结果写入 `~/Library/Logs/Gesture/touch-traces.jsonl`。文件包含触点 ID、状态、坐标、形状和判断时的起止位置；权限为 `0600`，当前文件和轮转文件 `touch-traces.old.jsonl` 各不超过 5 MiB。普通两指滚动不会持续落盘。指定 `GESTURE_CONFIG_PATH` 时，触点诊断存入该配置旁的 `diagnostics` 目录。
 
 辅助进程必须在 5 秒内报告就绪；关闭时主界面不等待进程退出，不响应正常终止的进程会在 2 秒后被强制结束。每次启动使用独立会话，旧进程回调和旧的重启任务不能改变新引擎状态。多个触控设备的时间戳分别校验，每次手势只使用同一设备的触点。
 
@@ -165,3 +172,5 @@ DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer swift build \
 GitHub Actions 在 macOS 上执行相同验证。硬件验收仍需在解锁的 Mac 上检查实际 2–5 指输入、辅助功能授权后的按键发送、快捷键录制、规则优先级、设置窗口关闭/重开，以及 Dock/菜单栏隐藏后的应用唤回。
 
 2026-10-01 本机验收记录见 [实测与验证报告](docs/verification-2026-10-01.md)，包含真实多指输入、捏合触点回放、快捷键录制、设置窗口与服务故障恢复。
+
+2026-10-02 掌缘修复记录见 [尺寸与生命周期验证](docs/verification-2026-10-02.md)；后续仍发生关窗误触的定位和修复见 [悬停触点及共同移动验证](docs/verification-2026-10-02-swipe-guard.md)。

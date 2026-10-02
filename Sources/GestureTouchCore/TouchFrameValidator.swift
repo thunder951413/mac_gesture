@@ -6,6 +6,7 @@ public enum TouchFrameValidator {
         var identifiers = Set<Int>()
         return touches.allSatisfy {
             (-1...128).contains($0.identifier) && identifiers.insert($0.identifier).inserted
+                && (0...7).contains($0.state)
                 && $0.normalizedX.isFinite && $0.normalizedY.isFinite
                 && (-0.2...1.2).contains($0.normalizedX) && (-0.2...1.2).contains($0.normalizedY)
                 && [$0.majorAxis, $0.minorAxis, $0.contactSize].allSatisfy { metric in

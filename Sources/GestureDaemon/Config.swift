@@ -1,7 +1,7 @@
 import Foundation
 import CoreGraphics
 
-enum GestureDirection: String, Codable {
+enum GestureDirection: String, Codable, Sendable {
     case up, down, left, right, pinch, spread
 }
 

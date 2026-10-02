@@ -52,4 +52,26 @@ final class CapturedPalmRegressionTests: XCTestCase {
             XCTAssertEqual(maximumRejected, expectedRejected, capture.name)
         }
     }
+
+    // 2026-10-02 第二轮现场采样：第三触点在顶部悬停约3.6秒；旧版会
+    // 按真实用户规则（仅3指向下、dy>=0.08）触发关闭窗口。
+    func testCapturedHoveringPalmCannotTriggerWindowCloseRule() throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "hover-palm-scroll", withExtension: "json"))
+        let frames = try JSONDecoder().decode([Frame].self, from: Data(contentsOf: url))
+        let recognizer = GestureRecognizer()
+        var closeAttempts = 0
+        var maximumAccepted = 0
+        recognizer.onGesture = { event in
+            guard event.fingers == 3 && event.direction == .down && -event.dy >= 0.08 else { return false }
+            closeAttempts += 1
+            return true
+        }
+        for frame in frames {
+            recognizer.processTouches(frame.touches, timestamp: frame.timestamp)
+            maximumAccepted = max(maximumAccepted, recognizer.acceptedTouchCount)
+        }
+        XCTAssertGreaterThan(frames.count, 400)
+        XCTAssertEqual(maximumAccepted, 2)
+        XCTAssertEqual(closeAttempts, 0)
+    }
 }

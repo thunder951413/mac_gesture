@@ -227,6 +227,8 @@ public struct ActiveTouch: Codable, Sendable {
     public let majorAxis: CGFloat?
     public let minorAxis: CGFloat?
     public let contactSize: CGFloat?
+    // MTContact 的 makeTouch/touching 才是实际接触；悬停与抬起残留不计入手指。
+    public var isTouching: Bool { state == 3 || state == 4 }
 
     public init(identifier: Int, state: Int, normalizedX: CGFloat, normalizedY: CGFloat,
                 majorAxis: CGFloat? = nil, minorAxis: CGFloat? = nil,

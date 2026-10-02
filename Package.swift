@@ -24,7 +24,8 @@ let package = Package(
         .testTarget(
             name: "GestureDaemonTests",
             dependencies: ["GestureDaemon", "GestureTouchCore"],
-            path: "Tests/GestureDaemonTests"
+            path: "Tests/GestureDaemonTests",
+            resources: [.process("Fixtures")]
         )
     ]
 )

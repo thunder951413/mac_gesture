@@ -190,8 +190,8 @@ final class GestureDaemon: ObservableObject {
         guard let recognizer else { return }
         let service = TouchServiceProvider()
         service.onFrame = { [weak self, weak recognizer] touches, timestamp in
-            self?.observeTouches(touches)
             recognizer?.processTouches(touches, timestamp: timestamp)
+            self?.observeTouches(touches, rejectedPalms: recognizer?.rejectedPalmCount ?? 0)
         }
         service.onStateChange = { [weak self] state in self?.handleTouchServiceState(state) }
         touchService = service
@@ -298,10 +298,16 @@ final class GestureDaemon: ObservableObject {
         NSWorkspace.shared.frontmostApplication?.bundleIdentifier
     }
 
-    private func observeTouches(_ touches: [ActiveTouch]) {
+    private func observeTouches(_ touches: [ActiveTouch], rejectedPalms: Int) {
         let now = ProcessInfo.processInfo.systemUptime
         guard touches.isEmpty || now - lastTouchObservationTime >= 0.1 else { return }
         lastTouchObservationTime = now
-        lastTouchObservation = touches.isEmpty ? "触点已全部抬起" : "正在接收 \(touches.count) 个触点"
+        if touches.isEmpty {
+            lastTouchObservation = "触点已全部抬起"
+        } else if rejectedPalms > 0 {
+            lastTouchObservation = "\(touches.count - rejectedPalms) 个手指触点，已过滤 \(rejectedPalms) 个掌缘触点"
+        } else {
+            lastTouchObservation = "正在接收 \(touches.count) 个触点"
+        }
     }
 }

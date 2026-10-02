@@ -25,7 +25,13 @@ enum MTContactDecoder {
                   (-0.2...1.2).contains(x), (-0.2...1.2).contains(y) else {
                 throw TouchError("触点字段异常（索引 \(index)）；私有结构体布局可能已变化")
             }
-            touches.append(ActiveTouch(identifier: identifier, state: state, normalizedX: x, normalizedY: y))
+            func metric(at offset: Int) -> CGFloat? {
+                let value = CGFloat(buffer.loadUnaligned(fromByteOffset: base + offset, as: Float.self))
+                return value.isFinite && value > 0 ? value : nil
+            }
+            touches.append(ActiveTouch(identifier: identifier, state: state, normalizedX: x, normalizedY: y,
+                                       majorAxis: metric(at: 60), minorAxis: metric(at: 64),
+                                       contactSize: metric(at: 48)))
         }
         return touches
     }

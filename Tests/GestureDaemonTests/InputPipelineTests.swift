@@ -31,6 +31,22 @@ final class InputPipelineTests: XCTestCase {
         XCTAssertFalse(TouchFrameValidator.isValid([ActiveTouch(identifier: 1, state: 4, normalizedX: .nan, normalizedY: 0.5)]))
     }
 
+    func testShapeMetricsSurviveIPCAndOldFramesRemainCompatible() throws {
+        let touch = ActiveTouch(identifier: 1, state: 4, normalizedX: 0.5, normalizedY: 0.5,
+                                majorAxis: 21, minorAxis: 12, contactSize: 4)
+        let frame = TouchServiceMessage(kind: .frame, timestamp: 1, touches: [touch])
+        let decoded = try XCTUnwrap(TouchServiceStreamDecoder().consume(line(frame)).first?.touches?.first)
+        XCTAssertEqual(decoded.majorAxis, 21)
+        XCTAssertEqual(decoded.minorAxis, 12)
+        XCTAssertEqual(decoded.contactSize, 4)
+        let old = Data("{\"kind\":\"frame\",\"timestamp\":1,\"touches\":[{\"identifier\":1,\"state\":4,\"normalizedX\":0.5,\"normalizedY\":0.5}]}\n".utf8)
+        let legacy = try XCTUnwrap(TouchServiceStreamDecoder().consume(old).first?.touches?.first)
+        XCTAssertNil(legacy.majorAxis)
+        XCTAssertFalse(TouchFrameValidator.isValid([
+            ActiveTouch(identifier: 1, state: 4, normalizedX: 0.5, normalizedY: 0.5, majorAxis: .infinity)
+        ]))
+    }
+
     func testCancelledAndMomentumScrollDoNotProduceGestures() {
         var accumulator = PublicGestureAccumulator()
         XCTAssertNil(accumulator.scroll(dx: 0.2, dy: 0, phase: .began))

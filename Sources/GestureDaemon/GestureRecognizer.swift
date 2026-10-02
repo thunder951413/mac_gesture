@@ -25,6 +25,9 @@ struct GestureTuning {
 }
 
 final class GestureRecognizer {
+    private var palmFilter = PalmRejectionFilter()
+    private(set) var acceptedTouchCount = 0
+    private(set) var rejectedPalmCount = 0
     private var activeTouches: [Int: ActiveTouch] = [:]
     private var gestureStartCentroid: CGPoint?
     private var currentCentroid: CGPoint = .zero
@@ -64,9 +67,37 @@ final class GestureRecognizer {
         set { tuning.liveTriggerDistance = newValue }
     }
 
-    func processTouches(_ touches: [ActiveTouch], timestamp: Double) {
-        guard timestamp.isFinite, TouchFrameValidator.isValid(touches) else { return }
+    func processTouches(_ rawTouches: [ActiveTouch], timestamp: Double) {
+        guard timestamp.isFinite, TouchFrameValidator.isValid(rawTouches) else { return }
+        let touches = palmFilter.filter(rawTouches, timestamp: timestamp)
         let activeSet = Set(touches.map { $0.identifier })
+        let rejected = Set(rawTouches.map(\.identifier)).subtracting(activeSet)
+        // 掌缘被确认时移除它对指数量、中心点和位移的影响；真实手指已有
+        // 起点时保留其轨迹，避免过滤较晚的掌缘吞掉正常两指滑动。
+        if !rejected.isDisjoint(with: activeTouches.keys) {
+            let origins = gestureStartPositions.filter { activeSet.contains($0.key) }
+            if touches.count >= 2 && origins.count == touches.count {
+                let count = CGFloat(origins.count)
+                let origin = origins.values.reduce(CGPoint.zero) {
+                    CGPoint(x: $0.x + $1.x / count, y: $0.y + $1.y / count)
+                }
+                gestureStartCentroid = origin
+                gestureFingers = touches.count
+                maxFingersSeen = touches.count
+                gestureTouchIdentifiers = activeSet
+                startSpread = origins.values.reduce(CGFloat.zero) {
+                    $0 + hypot($1.x - origin.x, $1.y - origin.y) / count
+                }
+                resetMaxGestureDisplacement(startPositions: origins)
+            } else {
+                resetGesture()
+            }
+        }
+        acceptedTouchCount = touches.count
+        if tuning.logLevel == "debug", rejected.count > rejectedPalmCount {
+            fputs("[Palm] 已过滤 \(rejected.count) 个掌缘触点，保留 \(touches.count) 个手指触点\n", stderr)
+        }
+        rejectedPalmCount = rejected.count
         let prevCount = activeTouches.count
 
         // Remove released touches, keep only still-active ones
@@ -83,12 +114,12 @@ final class GestureRecognizer {
 
         if nowCount == 0 && prevCount > 0 {
             evaluateGesture(fingers: gestureFingers > 0 ? gestureFingers : maxFingersSeen)
-            reset()
+            resetGesture()
             return
         }
 
         guard effectiveCount >= 2 else {
-            if nowCount == 0 { reset() }
+            if nowCount == 0 { resetGesture() }
             return
         }
 
@@ -216,6 +247,14 @@ final class GestureRecognizer {
     }
 
     func reset() {
+        palmFilter.reset()
+        acceptedTouchCount = 0
+        rejectedPalmCount = 0
+        resetGesture()
+    }
+
+    // 手指抬起后掌缘可能仍在，不能在每个手势结束时清除掌缘生命周期。
+    private func resetGesture() {
         activeTouches.removeAll()
         gestureStartCentroid = nil
         gestureStartPositions.removeAll()
@@ -284,8 +323,10 @@ final class GestureRecognizer {
         }
     }
 
-    private func resetMaxGestureDisplacement() {
-        gestureStartPositions = activeTouches.mapValues { CGPoint(x: $0.normalizedX, y: $0.normalizedY) }
+    private func resetMaxGestureDisplacement(startPositions: [Int: CGPoint]? = nil) {
+        gestureStartPositions = startPositions ?? activeTouches.mapValues {
+            CGPoint(x: $0.normalizedX, y: $0.normalizedY)
+        }
         maxCoherentTranslationDistance = 0
         maxGestureDx = 0
         maxGestureDy = 0

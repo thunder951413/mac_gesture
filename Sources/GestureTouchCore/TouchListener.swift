@@ -223,11 +223,20 @@ public struct ActiveTouch: Codable, Sendable {
     public let state: Int
     public let normalizedX: CGFloat
     public let normalizedY: CGFloat
+    /// 私有框架的接触椭圆与面积代理值，单位依设备而定；旧消息可不提供。
+    public let majorAxis: CGFloat?
+    public let minorAxis: CGFloat?
+    public let contactSize: CGFloat?
 
-    public init(identifier: Int, state: Int, normalizedX: CGFloat, normalizedY: CGFloat) {
+    public init(identifier: Int, state: Int, normalizedX: CGFloat, normalizedY: CGFloat,
+                majorAxis: CGFloat? = nil, minorAxis: CGFloat? = nil,
+                contactSize: CGFloat? = nil) {
         self.identifier = identifier
         self.state = state
         self.normalizedX = normalizedX
         self.normalizedY = normalizedY
+        self.majorAxis = majorAxis
+        self.minorAxis = minorAxis
+        self.contactSize = contactSize
     }
 }

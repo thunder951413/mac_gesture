@@ -21,6 +21,18 @@ struct GestureTuning {
     var liveTriggerDistance: CGFloat = 0.06      // 实时触发距离（手指未抬起时）
     var extraFingerConfirmFrames: Int = 3
     var extraFingerConfirmDuration: Double = 0.018
+    /// 手势已移动该距离并持续下列时长后固定手指组，之后新增的触点不计入。
+    var lockMotionDistance: CGFloat = 0.03
+    var twoFingerLockDelay: Double = 0.08
+    /// 三指及以上落指常错开数十毫秒（五指捏合实测第五指晚 64 ms），窗口更宽。
+    var multiFingerLockDelay: Double = 0.12
+    /// 短暂擦碰：中途加入、存在时间短于此值即抬起的触点不应冻结原手势。
+    var brushContactMaxDuration: Double = 0.15
+    var brushContactMinJoinDelay: Double = 0.04
+    /// 所有触点在该时长内移动都不超过容差时，以当前位置重新作为起点，
+    /// 避免手搭在触控板上时缓慢漂移累积成一次滑动。
+    var stillnessRebaseDuration: Double = 0.3
+    var stillnessMotionTolerance: CGFloat = 0.01
     var logLevel: String = "info"
 }
 
@@ -56,6 +68,10 @@ final class GestureRecognizer {
     private var lastObservedFingerTimestamp: Double = 0
     private var observedFingerFrames = 0
     private var gestureTouchIdentifiers = Set<Int>()
+    /// 每个有效触点首次出现的时间（跨手势保留，触点抬起时移除）。
+    private var contactFirstSeen: [Int: Double] = [:]
+    private var stillnessAnchor: [Int: CGPoint] = [:]
+    private var stillnessAnchorTimestamp: Double?
 
     var onGesture: ((GestureEvent) -> Bool)?
     var onTrace: ((GestureTrace) -> Void)?
@@ -85,10 +101,12 @@ final class GestureRecognizer {
         let nonPalms = palmFilter.filter(rawTouches, timestamp: timestamp)
         let rejected = Set(rawTouches.map(\.identifier)).subtracting(nonPalms.map(\.identifier))
         var touches = nonPalms.filter(\.isTouching)
-        // 已经持续移动的两指手势固定原手指组；中途贴上的掌缘不能升级它。
-        // 初始落指留出 80 ms 的组合窗口，尚未移动的手势仍可增加手指。
-        if lockedTouchIdentifiers == nil, gestureFingers == 2,
-           maxGestureDistance >= 0.03, timestamp - gestureBeganTimestamp >= 0.08 {
+        // 已经持续移动的多指手势固定原手指组；中途贴上的掌缘或第三/四根手指
+        // 不能把两指滚动升级为三指、把三指滑动升级为四指捏合。初始落指留出
+        // 组合窗口（两指 80 ms，三指及以上 120 ms），尚未移动的手势仍可增加手指。
+        let lockDelay = gestureFingers >= 3 ? tuning.multiFingerLockDelay : tuning.twoFingerLockDelay
+        if lockedTouchIdentifiers == nil, gestureFingers >= 2,
+           maxGestureDistance >= tuning.lockMotionDistance, timestamp - gestureBeganTimestamp >= lockDelay {
             lockedTouchIdentifiers = gestureTouchIdentifiers
         }
         if let lockedTouchIdentifiers {
@@ -99,15 +117,21 @@ final class GestureRecognizer {
                 let direction: GestureDirection = abs(maxGestureDx) > abs(maxGestureDy)
                     ? (maxGestureDx > 0 ? .right : .left) : (maxGestureDy > 0 ? .up : .down)
                 emitTrace(decision: .ignoredLateContact,
-                          event: GestureEvent(fingers: 2, direction: direction,
+                          event: GestureEvent(fingers: gestureFingers, direction: direction,
                                               distance: maxGestureDistance, dx: maxGestureDx, dy: maxGestureDy),
                           positions: currentGesturePositions)
             }
         }
         let activeSet = Set(touches.map { $0.identifier })
+        let previousFirstSeen = contactFirstSeen
+        contactFirstSeen = contactFirstSeen.filter { activeSet.contains($0.key) }
+        for identifier in activeSet where contactFirstSeen[identifier] == nil {
+            contactFirstSeen[identifier] = timestamp
+        }
         // 掌缘被确认时移除它对指数量、中心点和位移的影响；真实手指已有
         // 起点时保留其轨迹，避免过滤较晚的掌缘吞掉正常两指滑动。
-        if !rejected.isDisjoint(with: activeTouches.keys) {
+        // 已触发的手势不重置：否则剩余手指可在同一次接触中再次触发规则。
+        if !didTriggerCurrentGesture, !rejected.isDisjoint(with: activeTouches.keys) {
             let origins = gestureStartPositions.filter { activeSet.contains($0.key) }
             if touches.count >= 2 && origins.count == touches.count {
                 let count = CGFloat(origins.count)
@@ -122,6 +146,7 @@ final class GestureRecognizer {
                     $0 + hypot($1.x - origin.x, $1.y - origin.y) / count
                 }
                 resetMaxGestureDisplacement(startPositions: origins)
+                stillnessAnchorTimestamp = nil
             } else {
                 resetGesture()
             }
@@ -160,10 +185,18 @@ final class GestureRecognizer {
         guard nowCount <= effectiveCount else { return }
 
         if gestureFingers > 0 && nowCount < gestureFingers {
-            if tuning.logLevel == "debug" {
-                fputs("[Gesture] 手指部分抬起，冻结中心点 | 当前=\(nowCount) 指 期望=\(gestureFingers) 指\n", stderr)
+            // 中途擦过的掌缘/手指被确认后很快离开：回到剩余手指继续识别，
+            // 不能把原本的三指滑动冻结成一次不会触发的“四指手势”。
+            guard isBrushDeparture(activeSet: activeSet, previousFirstSeen: previousFirstSeen,
+                                   timestamp: timestamp) else {
+                if tuning.logLevel == "debug" {
+                    fputs("[Gesture] 手指部分抬起，冻结中心点 | 当前=\(nowCount) 指 期望=\(gestureFingers) 指\n", stderr)
+                }
+                return
             }
-            return
+            if tuning.logLevel == "debug" {
+                fputs("[Gesture] 短暂擦碰的触点已离开，按剩余 \(nowCount) 指重新开始\n", stderr)
+            }
         }
 
         updateCentroid()
@@ -173,6 +206,7 @@ final class GestureRecognizer {
             gestureStartCentroid = currentCentroid
             startSpread = calculateSpread()
             resetMaxGestureDisplacement()
+            stillnessAnchorTimestamp = nil
         }
 
         if !didTriggerCurrentGesture && (effectiveCount > gestureFingers || activeSet != gestureTouchIdentifiers) {
@@ -182,8 +216,10 @@ final class GestureRecognizer {
             gestureStartCentroid = currentCentroid
             startSpread = calculateSpread()
             resetMaxGestureDisplacement()
+            stillnessAnchorTimestamp = nil
         }
 
+        rebaseIfResting(timestamp: timestamp)
         updateMaxGestureDisplacement()
         // 捏合可能伴随中心点移动；先用每个触点相对中心的位移估计
         // 形变，再比较剩余的共同平移。所有手指同向移动时形变接近零。
@@ -302,6 +338,7 @@ final class GestureRecognizer {
     func reset() {
         palmFilter.reset()
         traceBuffer.reset()
+        contactFirstSeen.removeAll()
         acceptedTouchCount = 0
         rejectedPalmCount = 0
         resetGesture()
@@ -328,6 +365,8 @@ final class GestureRecognizer {
         lastObservedFingerTimestamp = 0
         observedFingerFrames = 0
         gestureTouchIdentifiers.removeAll()
+        stillnessAnchor.removeAll()
+        stillnessAnchorTimestamp = nil
     }
 
     private func updateObservedFingerCount(_ count: Int, timestamp: Double) {
@@ -340,7 +379,54 @@ final class GestureRecognizer {
         observedFingerFrames = 1
     }
 
+    /// 抬起的触点都是“晚到且短暂”的：比剩余最早的手指晚至少 40 ms 落下，
+    /// 且接触不足 150 ms。正常抬手时离开的是从一开始就参与手势的手指。
+    private func isBrushDeparture(activeSet: Set<Int>, previousFirstSeen: [Int: Double],
+                                  timestamp: Double) -> Bool {
+        guard !didTriggerCurrentGesture, activeSet.count >= 2,
+              activeSet.isSubset(of: gestureTouchIdentifiers),
+              let earliestRemaining = activeSet.compactMap({ contactFirstSeen[$0] }).min() else { return false }
+        let departed = gestureTouchIdentifiers.subtracting(activeSet)
+        return !departed.isEmpty && departed.allSatisfy { identifier in
+            guard let began = previousFirstSeen[identifier] else { return false }
+            return timestamp - began < tuning.brushContactMaxDuration
+                && began - earliestRemaining >= tuning.brushContactMinJoinDelay
+        }
+    }
+
+    /// 手指搭在触控板上几乎不动时把起点移到当前位置。只看每个触点自身的位移，
+    /// 捏合时中心点不动但触点在动，不会被误判为静止。
+    private func rebaseIfResting(timestamp: Double) {
+        guard !didTriggerCurrentGesture, gestureStartCentroid != nil else { return }
+        let positions = activeTouches.mapValues { CGPoint(x: $0.normalizedX, y: $0.normalizedY) }
+        guard let anchorTimestamp = stillnessAnchorTimestamp,
+              Set(stillnessAnchor.keys) == Set(positions.keys) else {
+            stillnessAnchor = positions
+            stillnessAnchorTimestamp = timestamp
+            return
+        }
+        let motion = positions.map { identifier, point -> CGFloat in
+            let anchor = stillnessAnchor[identifier]!
+            return hypot(point.x - anchor.x, point.y - anchor.y)
+        }.max() ?? 0
+        if motion > tuning.stillnessMotionTolerance {
+            stillnessAnchor = positions
+            stillnessAnchorTimestamp = timestamp
+        } else if timestamp - anchorTimestamp >= tuning.stillnessRebaseDuration {
+            if maxGestureDistance > tuning.stillnessMotionTolerance, tuning.logLevel == "debug" {
+                fputs("[Gesture] 手指停顿 \(String(format: "%.2f", timestamp - anchorTimestamp))s，丢弃此前 \(String(format: "%.3f", maxGestureDistance)) 的缓慢位移\n", stderr)
+            }
+            gestureStartCentroid = currentCentroid
+            startSpread = calculateSpread()
+            resetMaxGestureDisplacement()
+            stillnessAnchor = positions
+            stillnessAnchorTimestamp = timestamp
+        }
+    }
+
     private func effectiveFingerCount(for observedCount: Int, timestamp: Double) -> Int {
+        // 手指减少无需确认：保留旧数量会让剩余手指被当作更多手指处理。
+        if gestureFingers >= 2 && observedCount < gestureFingers { return observedCount }
         guard observedCount >= 3 else { return observedCount }
 
         let stableDuration = timestamp - lastObservedFingerTimestamp
